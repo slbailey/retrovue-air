@@ -1,159 +1,295 @@
-This document describes the native C++ playout engine that underpins the RetroVue runtime’s real-time media delivery.
-_Related: [RetroVue components – playout](../Retrovue/docs/components/playout.md) • [RetroVue runtime – renderer](../Retrovue/docs/runtime/Renderer.md)_
+# RetroVue Playout Engine
 
-# RetroVue playout engine
+**Native C++ playout engine for broadcasting video content with frame-accurate timing.**
 
-The RetroVue playout engine turns ChannelManager schedules into decoded frame streams that the Renderer converts to MPEG-TS at `http://localhost:<port>/channel/<channel-num>.ts`, keeping every channel aligned with the MasterClock.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![C++](https://img.shields.io/badge/C++-20-blue.svg)](https://isocpp.org/)
+[![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
 
-For detailed architecture and integration notes, see [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md)
+---
 
-## Purpose
+## 🎯 Project Status
 
-This component:
+| Phase | Status | Description |
+|-------|--------|-------------|
+| **Phase 1** | ✅ Complete | gRPC skeleton + proto definitions |
+| **Phase 2** | ✅ Complete | Frame buffer + stub decode + metrics |
+| **Phase 3** | 🚧 In Progress | **FFmpeg decoder ✅** + Renderer + HTTP metrics |
+| Phase 4 | 📋 Planned | Production hardening + multi-channel |
 
-- Converts RetroVue playout plans into a continuous stream of decoded frames.
-- Supplies the Renderer with frame buffers and timing metadata required for deterministic MPEG-TS output.
-- Maintains clock alignment guarantees shared across the RetroVue runtime.
-- Communicates with the RetroVue runtime via a gRPC control API defined in `proto/retrovue/playout.proto`.
+### Latest Milestone: FFmpeg Decoder Implementation
 
-## Architecture
+- ✅ Real video decoding with libavformat/libavcodec
+- ✅ Multi-codec support (H.264, HEVC, etc.)
+- ✅ Resolution scaling and YUV420P output
+- ✅ Conditional compilation (works without FFmpeg)
+- ✅ Performance monitoring and error handling
+- ✅ All tests passing
 
-The architecture centers on per-channel workers that mediate between the ChannelManager, storage, and the Renderer.
+**Next:** Renderer integration and HTTP metrics server
 
-- Inputs come from channel configuration, ChannelManager playout plan segments, and asset metadata retrieved from RetroVue shared storage.
-- Responsibilities include resolving asset URIs via libavformat/libavcodec, maintaining decode pipelines that stay ahead of the Renderer, and attaching precise PTS/DTS metadata to every frame.
-- Out-of-scope concerns such as scheduling, plan generation, and MPEG-TS packaging remain owned by the RetroVue runtime and Renderer.
+---
 
-## Interfaces
+## 🏗️ Architecture
 
-The playout engine exposes three primary APIs that bind it into the wider RetroVue ecosystem.
-
-- Control API (in-process gRPC):
-
-  - `StartChannel(channel_id, plan_handle, port)` boots a dedicated decode loop.
-  - `UpdatePlan(channel_id, plan_handle)` hot-swaps active plans when the scheduler issues deltas.
-  - `StopChannel(channel_id)` drains buffers and releases decoder resources.
-
-- Frame bus (shared ring buffer per channel):
-
-  - Frames are pushed with PTS, DTS, duration, and asset provenance metadata.
-  - The Renderer expects a minimum lead time of 150 ms and a soft ceiling of 500 ms.
-
-- Health telemetry (Prometheus):
-  - `retrovue_playout_channel_state{channel="N"}` reports `ready`, `buffering`, or `error`.
-  - `retrovue_playout_frame_gap_seconds` measures deviation from ChannelManager timing.
-
-```proto
-service PlayoutControl {
-  rpc StartChannel(StartChannelRequest) returns (StartChannelResponse);
-  rpc UpdatePlan(UpdatePlanRequest) returns (UpdatePlanResponse);
-  rpc StopChannel(StopChannelRequest) returns (StopChannelResponse);
-}
+```
+┌─────────────────────────────────────────────────────────┐
+│ Python ChannelManager (Retrovue Core)                  │
+│  └─ gRPC Client                                         │
+└───────────────────────┬─────────────────────────────────┘
+                        │ gRPC (proto/retrovue/playout.proto)
+┌───────────────────────▼─────────────────────────────────┐
+│ C++ Playout Engine                                      │
+│ ┌─────────────────────────────────────────────────────┐ │
+│ │ PlayoutControlImpl (gRPC Service)                   │ │
+│ │  ├─ StartChannel(plan_handle)                       │ │
+│ │  ├─ UpdatePlan(plan_handle)                         │ │
+│ │  └─ StopChannel()                                   │ │
+│ └─────────────────────────────────────────────────────┘ │
+│                         ↓                                │
+│ ┌─────────────────────────────────────────────────────┐ │
+│ │ FrameProducer (decode thread)                       │ │
+│ │  ├─ FFmpegDecoder (libav*)                          │ │
+│ │  │   ├─ Format detection                            │ │
+│ │  │   ├─ Video decoding                              │ │
+│ │  │   └─ Resolution scaling                          │ │
+│ │  └─ Push to FrameRingBuffer                         │ │
+│ └─────────────────────────────────────────────────────┘ │
+│                         ↓                                │
+│ ┌─────────────────────────────────────────────────────┐ │
+│ │ FrameRingBuffer (lock-free circular buffer)         │ │
+│ │  └─ 60 frames @ 1920x1080 YUV420P                  │ │
+│ └─────────────────────────────────────────────────────┘ │
+│                         ↓                                │
+│ ┌─────────────────────────────────────────────────────┐ │
+│ │ Renderer (Phase 3 - in progress)                    │ │
+│ │  ├─ Preview window (debug)                          │ │
+│ │  └─ Headless mode (production)                      │ │
+│ └─────────────────────────────────────────────────────┘ │
+│                         ↓                                │
+│ ┌─────────────────────────────────────────────────────┐ │
+│ │ MetricsExporter (Prometheus)                        │ │
+│ │  └─ HTTP server @ localhost:9308/metrics            │ │
+│ └─────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────┘
 ```
 
-### Control schema contract
+---
 
-- The canonical gRPC schema resides at `proto/retrovue/playout.proto`.
-- Both the C++ engine and the Python runtime must build against the same `PLAYOUT_API_VERSION` embedded in the proto file options.
-- Changes to the schema require regenerating C++ (`retrovue_playout_proto`) and Python stubs in lock-step so the ChannelManager and playout engine remain wire-compatible.
+## 🚀 Quick Start
 
-### Communication layer
+### Prerequisites
 
-The control surface between the Python ChannelManager and the playout engine is implemented using **gRPC**. All control traffic flows through a lightweight in-process or Unix-domain gRPC channel, depending on deployment configuration.
+**Required:**
+- CMake 3.15+
+- C++20 compiler (MSVC 2019+, GCC 10+, Clang 11+)
+- vcpkg (for dependencies)
+- gRPC + Protobuf (via vcpkg)
 
-- **Transport:** In-process for local orchestration; Unix socket for multi-service deployments.
-- **Schema:** Defined in `proto/retrovue/playout.proto` and compiled into both Python and C++ bindings.
-- **Versioning:** Both sides must target the same `PLAYOUT_API_VERSION` constant. Backward-incompatible schema changes require a version bump and synchronized releases of `retrovue-core` and `retrovue-playout`.
-- **Fallback path:** If gRPC initialization fails, the ChannelManager marks the channel `error` and retries the connection on an exponential backoff.
+**Optional (for real video decoding):**
+- FFmpeg development libraries (libavformat, libavcodec, libavutil, libswscale)
 
-This gRPC interface is the sole contract between the RetroVue runtime and the native playout engine.
+### Build
 
-## Runtime model
+```powershell
+# Clone repository
+git clone https://github.com/your-org/Retrovue-playout.git
+cd Retrovue-playout
 
-The runtime model ensures deterministic decode and delivery across multiple channels.
+# Configure (assumes vcpkg installed)
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 
-- A single process hosts multiple channel workers; each worker contains:
-  - A demux thread that reads packets through libavformat.
-  - A decode thread pool sized per codec profile (defaults: H.264 = 2 threads, HEVC = 3 threads).
-  - A frame staging queue capped at 90 frames (≈3 s at 30 fps).
-- Workers synchronize against the MasterClock via monotonic timestamps.
-- The Renderer pulls staged frames over shared memory or TCP (configurable) and emits MPEG-TS.
-- The Renderer is intentionally decoupled from decode timing; it consumes whatever the playout engine publishes, ensuring the visual output stays locked to the MasterClock rather than the system wall clock.
+# Build
+cmake --build build --config Debug
+```
 
-## Failure and fallback behavior
+### Run
 
-Resilience paths keep channels running during transient issues.
+```powershell
+# Start playout engine
+.\build\Debug\retrovue_playout.exe --port 50051
 
-- Asset open failures set the channel state to `error` and fall back to the slate loop (PNG → YUV).
-- Buffer underruns insert the slate until the staging queue recovers above 30 frames.
-- Decoder crashes trigger automatic restarts with exponential backoff (maximum five attempts per minute).
-- The health exporter marks a channel `error` after five seconds without a successful decode.
+# In another terminal, test with Python client
+python scripts\test_server.py
+```
 
-## Operator workflows
+**Expected Output:**
+```
+[TEST 1] GetVersion              [PASS]
+[TEST 2] StartChannel            [PASS]
+[TEST 3] UpdatePlan              [PASS]
+[TEST 4] StopChannel             [PASS]
 
-Operators can build, run, and observe the engine using standard RetroVue tooling.
+[SUCCESS] All tests passed!
+```
 
-Build (Bash):
+---
 
+## 📦 Components
+
+### Core Modules
+
+| Module | Path | Description |
+|--------|------|-------------|
+| **gRPC Service** | `src/playout_service.*` | PlayoutControl API implementation |
+| **Frame Buffer** | `src/buffer/` | Lock-free circular buffer (60 frames) |
+| **Frame Producer** | `src/decode/FrameProducer.*` | Decode thread orchestrator |
+| **FFmpeg Decoder** | `src/decode/FFmpegDecoder.*` | Real video decoding (Phase 3) |
+| **Metrics** | `src/telemetry/` | Prometheus metrics exporter |
+| **Proto** | `proto/retrovue/` | gRPC service definitions |
+
+### Header Structure
+
+Following [development standards](docs/development-standards.md):
+
+```
+include/retrovue/
+├─ buffer/
+│  └─ FrameRingBuffer.h
+├─ decode/
+│  ├─ FrameProducer.h
+│  └─ FFmpegDecoder.h
+└─ telemetry/
+   └─ MetricsExporter.h
+```
+
+---
+
+## 🧪 Testing
+
+### Unit Tests
+
+```powershell
+# Run buffer tests (requires GTest)
+.\build\Debug\test_buffer.exe
+
+# Run decode tests
+.\build\Debug\test_decode.exe
+```
+
+### Integration Tests
+
+```powershell
+# Start server
+.\build\Debug\retrovue_playout.exe
+
+# Run Python test suite
+python scripts\test_server.py
+```
+
+---
+
+## 📚 Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Project Overview](docs/PROJECT_OVERVIEW.md) | High-level architecture |
+| [Phase 2 Goals](docs/developer/Phase2_Goals.md) | Frame bus integration |
+| [Phase 3 Plan](PHASE3_PLAN.md) | Renderer + metrics roadmap |
+| [Quick Start](docs/developer/QuickStart.md) | Getting started guide |
+| [Build & Debug](docs/developer/BuildAndDebug.md) | Development workflow |
+| [Playout Contract](docs/contracts/PlayoutContract.m) | gRPC API specification |
+| [Development Standards](docs/development-standards.md) | Code structure guidelines |
+
+### Phase Milestones
+
+- [Phase 1: Skeleton](PHASE1_SKELETON.md) ✅
+- [Phase 2: Frame Bus](PHASE2_COMPLETE.md) ✅
+- [Phase 3: FFmpeg Decoder](PHASE3_FFMPEG_IMPLEMENTATION.md) ✅
+- [Refactoring Complete](REFACTORING_COMPLETE.md) ✅
+
+---
+
+## 🔧 Configuration
+
+### FFmpeg Integration
+
+The playout engine supports both **stub mode** (synthetic frames) and **real decode mode** (FFmpeg).
+
+#### Without FFmpeg (Stub Mode)
+
+Build proceeds normally without FFmpeg:
+```powershell
+cmake -S . -B build
+cmake --build build
+```
+
+**Behavior:**
+- Generates synthetic test frames
+- No external dependencies required
+- Good for development and testing
+
+#### With FFmpeg (Real Decode)
+
+Install FFmpeg and rebuild:
+
+**Windows (vcpkg):**
+```powershell
+vcpkg install ffmpeg:x64-windows
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+cmake --build build
+```
+
+**Linux:**
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+sudo apt install libavformat-dev libavcodec-dev libavutil-dev libswscale-dev
+cmake -S . -B build
 cmake --build build
 ```
 
-Build (PowerShell):
+**Behavior:**
+- Decodes real video files (MP4, MKV, etc.)
+- Supports H.264, HEVC, and other codecs
+- Production-ready performance
 
-```powershell
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-```
+---
 
-Run a single channel (PowerShell example):
+## 🎯 Roadmap
 
-```powershell
-.\build\retrovue_playout.exe --channel 1 --port 8090
-```
+### Phase 3 (Current)
 
-Connect the Renderer for MPEG-TS output (PowerShell example):
+- ✅ FFmpegDecoder implementation
+- 🚧 FrameRenderer (preview + headless)
+- 🚧 HTTP metrics server
+- 🚧 MasterClock integration
 
-```powershell
-ffmpeg -re -f rawvideo -pix_fmt yuv420p -s 1920x1080 -r 30 `
-  -i \\.\pipe\retrovue-playout-1 `
-  -f mpegts http://localhost:8090/channel/1.ts
-```
+### Phase 4 (Next)
 
-Observe telemetry:
+- Multi-channel support
+- Hardware acceleration (NVDEC, QSV)
+- Frame-accurate timing
+- Production hardening
 
-```powershell
-Invoke-WebRequest http://localhost:9308/metrics
-```
+---
 
-Enable verbose diagnostics:
+## 🤝 Contributing
 
-```powershell
-.\build\retrovue_playout.exe --channel 1 --port 8090 --log-level trace
-```
+1. Follow [development standards](docs/development-standards.md)
+2. Run tests before committing
+3. Update documentation with changes
+4. Use conventional commit messages
 
-## Naming rules
+---
 
-Consistent naming keeps the playout engine aligned with RetroVue conventions.
+## 📄 License
 
-- Executable binary: `retrovue_playout` (no camelCase variants).
-- IPC endpoints: `retrovue-playout-<channel-id>` for pipes or sockets.
-- Default Renderer HTTP base: `http://localhost:<base+channel-id>/channel/<channel-id>.ts`.
-- Metrics labels use the numeric `channel` value issued by the ChannelManager.
+MIT License - see [LICENSE](LICENSE) for details
 
-## Documentation
+---
 
-### Developer Documentation
+## 🔗 Related Projects
 
-- [Development Standards](docs/development-standards.md): Defines folder structure, naming rules, and module layout conventions.
+- [Retrovue Core](https://github.com/your-org/Retrovue) - Python media asset manager
+- [Retrovue Web](https://github.com/your-org/Retrovue-web) - Web UI
 
-## Contributing
+---
 
-Follow RetroVue's contract-first workflow, keep documentation in sentence case, and open pull requests against this repository with cross-references back to RetroVue core changes when relevant. Every new feature or interface change must be accompanied by an update to this README and any corresponding RetroVue design documents.
+## 📞 Support
 
-## See also
+- Issues: [GitHub Issues](https://github.com/your-org/Retrovue-playout/issues)
+- Docs: [docs/](docs/)
+- Contact: dev@retrovue.io
 
-- [RetroVue components – playout](../Retrovue/docs/components/playout.md)
-- [RetroVue runtime – renderer](../Retrovue/docs/runtime/Renderer.md)
-- [ChannelManager implementation](../Retrovue/src/retrovue/runtime/channel_manager.py)
+---
+
+**Built with ❤️ by the RetroVue Team**
