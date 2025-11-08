@@ -15,12 +15,14 @@
 #include "retrovue/playout.grpc.pb.h"
 #include "retrovue/buffer/FrameRingBuffer.h"
 #include "retrovue/decode/FrameProducer.h"
+#include "retrovue/renderer/FrameRenderer.h"
 #include "retrovue/telemetry/MetricsExporter.h"
 
 namespace retrovue {
 namespace playout {
 
 // ChannelWorker manages the full lifecycle of a single playout channel.
+// Phase 3: Includes decoder, buffer, and renderer.
 struct ChannelWorker {
   int32_t channel_id;
   std::string plan_handle;
@@ -28,13 +30,14 @@ struct ChannelWorker {
   
   std::unique_ptr<buffer::FrameRingBuffer> ring_buffer;
   std::unique_ptr<decode::FrameProducer> producer;
+  std::unique_ptr<renderer::FrameRenderer> renderer;
   
   ChannelWorker(int32_t id, const std::string& plan, int32_t p)
       : channel_id(id), plan_handle(plan), port(p) {}
 };
 
 // PlayoutControlImpl implements the gRPC service defined in playout.proto.
-// Phase 2: Integrates decode pipeline, frame buffers, and telemetry.
+// Phase 3: Full decode -> render -> metrics pipeline.
 class PlayoutControlImpl final : public PlayoutControl::Service {
  public:
   // Constructs the service with a shared metrics exporter.

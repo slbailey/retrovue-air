@@ -88,11 +88,15 @@ add_executable(retrovue_playout
     src/buffer/FrameRingBuffer.cpp
     src/decode/FrameProducer.cpp
     src/decode/FFmpegDecoder.cpp
+    src/renderer/FrameRenderer.cpp
     src/telemetry/MetricsExporter.cpp
+    src/telemetry/MetricsHTTPServer.cpp
     include/retrovue/buffer/FrameRingBuffer.h
     include/retrovue/decode/FrameProducer.h
     include/retrovue/decode/FFmpegDecoder.h
-    include/retrovue/telemetry/MetricsExporter.h)
+    include/retrovue/renderer/FrameRenderer.h
+    include/retrovue/telemetry/MetricsExporter.h
+    include/retrovue/telemetry/MetricsHTTPServer.h)
 
 target_link_libraries(retrovue_playout
     PRIVATE 
@@ -100,6 +104,25 @@ target_link_libraries(retrovue_playout
 
 if(FFMPEG_FOUND)
     target_link_libraries(retrovue_playout PRIVATE PkgConfig::FFMPEG)
+endif()
+
+# SDL2 libraries for Phase 3 preview renderer (optional)
+find_package(SDL2 CONFIG)
+if(SDL2_FOUND)
+    message(STATUS "SDL2 found - preview renderer enabled")
+    add_compile_definitions(RETROVUE_SDL2_AVAILABLE)
+    target_link_libraries(retrovue_playout PRIVATE SDL2::SDL2 SDL2::SDL2main)
+else()
+    message(WARNING "SDL2 not found - preview renderer disabled. Install SDL2 for preview window support.")
+endif()
+
+# Platform-specific socket libraries for HTTP server
+if(WIN32)
+    # Winsock is linked automatically via pragma comment in source
+else()
+    # Unix systems need pthread
+    find_package(Threads REQUIRED)
+    target_link_libraries(retrovue_playout PRIVATE Threads::Threads)
 endif()
 
 target_include_directories(retrovue_playout

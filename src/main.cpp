@@ -73,14 +73,19 @@ void RunServer(const ServerConfig& config) {
   std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
   
   std::cout << "==============================================================" << std::endl;
-  std::cout << "RetroVue Playout Engine (Phase 2)" << std::endl;
+  std::cout << "RetroVue Playout Engine (Phase 3)" << std::endl;
   std::cout << "==============================================================" << std::endl;
-  std::cout << "Server listening on: " << config.server_address << std::endl;
+  std::cout << "gRPC Server: " << config.server_address << std::endl;
   std::cout << "API Version: 1.0.0" << std::endl;
   std::cout << "gRPC Health Check: Enabled" << std::endl;
   std::cout << "gRPC Reflection: " << (config.enable_reflection ? "Enabled" : "Disabled") << std::endl;
-  std::cout << "Metrics Port: 9308 (stub mode - console logging)" << std::endl;
+  std::cout << "Metrics Endpoint: http://localhost:9308/metrics" << std::endl;
   std::cout << "==============================================================" << std::endl;
+  std::cout << "\nComponents:" << std::endl;
+  std::cout << "  ✓ FFmpegDecoder (real video decoding)" << std::endl;
+  std::cout << "  ✓ FrameRingBuffer (lock-free circular buffer)" << std::endl;
+  std::cout << "  ✓ FrameRenderer (headless mode)" << std::endl;
+  std::cout << "  ✓ MetricsHTTPServer (Prometheus format)" << std::endl;
   std::cout << "\nPress Ctrl+C to shutdown...\n" << std::endl;
 
   // Wait for the server to shutdown

@@ -15,6 +15,9 @@
 
 namespace retrovue::telemetry {
 
+// Forward declaration
+class MetricsHTTPServer;
+
 // ChannelState represents the current state of a playout channel.
 enum class ChannelState {
   STOPPED = 0,
@@ -90,20 +93,14 @@ class MetricsExporter {
   bool GetChannelMetrics(int32_t channel_id, ChannelMetrics& metrics) const;
 
  private:
-  // Main server loop.
-  void ServerLoop();
-
   // Generates Prometheus-format metrics text.
   std::string GenerateMetricsText() const;
-
-  // Handles a single HTTP request (stub implementation).
-  void HandleRequest();
 
   int port_;
   std::atomic<bool> running_;
   std::atomic<bool> stop_requested_;
   
-  std::unique_ptr<std::thread> server_thread_;
+  std::unique_ptr<MetricsHTTPServer> http_server_;
   
   // Channel metrics storage (protected by mutex)
   mutable std::mutex metrics_mutex_;

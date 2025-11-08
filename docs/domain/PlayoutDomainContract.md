@@ -21,6 +21,7 @@ The playout engine domain consists of six primary entities:
 **Purpose**: Represents a single broadcast channel worker that manages decode, buffering, and frame delivery for one logical channel.
 
 **Ownership**: Each Channel instance owns:
+
 - One `FrameProducer` (decode pipeline)
 - One `FrameRingBuffer` (staging queue)
 - One `FrameRenderer` reference (output consumer)
@@ -30,12 +31,12 @@ The playout engine domain consists of six primary entities:
 
 **State Machine**:
 
-| State        | Description                                               |
-|--------------|-----------------------------------------------------------|
-| `ready`      | Channel is actively decoding and delivering frames        |
-| `buffering`  | Channel is rebuilding buffer depth after underrun         |
-| `error`      | Fatal error occurred; channel awaiting retry or shutdown  |
-| `stopped`    | Channel has been gracefully shut down                     |
+| State       | Description                                              |
+| ----------- | -------------------------------------------------------- |
+| `ready`     | Channel is actively decoding and delivering frames       |
+| `buffering` | Channel is rebuilding buffer depth after underrun        |
+| `error`     | Fatal error occurred; channel awaiting retry or shutdown |
+| `stopped`   | Channel has been gracefully shut down                    |
 
 **State Transitions**:
 
@@ -52,6 +53,7 @@ stateDiagram-v2
 ```
 
 **Invariants**:
+
 - A Channel must have exactly one associated `FrameProducer` and `FrameRingBuffer` when state is `ready` or `buffering`
 - Channel state transitions are atomic and immediately reflected in telemetry
 - Channels cannot transition from `stopped` to any other state (terminal state)
@@ -82,12 +84,14 @@ struct FrameMetadata {
 ```
 
 **Lifecycle**:
+
 1. **Decode**: Frame is allocated and decoded by `FrameProducer`
 2. **Stage**: Frame is pushed to `FrameRingBuffer` with metadata
 3. **Consume**: Frame is popped by `FrameRenderer` for output
 4. **Release**: Frame memory is freed after rendering
 
 **Invariants**:
+
 - PTS must be monotonically increasing within a single asset stream
 - DTS ≤ PTS for all frames
 - Duration must be positive and non-zero
@@ -103,11 +107,13 @@ struct FrameMetadata {
 **Representation**: String handle (e.g., `"morning_block"`, `"plan_uuid_123"`) resolved by ChannelManager via shared storage or IPC.
 
 **Usage**:
+
 - Passed in `StartChannel` to initialize decode pipeline
 - Passed in `UpdatePlan` to hot-swap active content
 - Engine does not parse plan contents; treats as opaque reference
 
 **Lifecycle**:
+
 1. **Creation**: ChannelManager generates plan based on schedule
 2. **Registration**: Plan is registered in shared storage accessible to playout engine
 3. **Activation**: Plan handle is passed to playout engine via gRPC
@@ -115,6 +121,7 @@ struct FrameMetadata {
 5. **Expiration**: Plan becomes inactive after `UpdatePlan` or `StopChannel`
 
 **Invariants**:
+
 - Plan handles are immutable once issued
 - Plans must be resolvable to a sequence of asset URIs with start/duration metadata
 - Invalid plan handles result in channel `error` state
@@ -131,29 +138,32 @@ struct FrameMetadata {
 class FrameRenderer {
 public:
     virtual ~FrameRenderer() = default;
-    
+
     // Pull next frame from channel buffer
     virtual bool pull_frame(int channel_id, Frame& out_frame) = 0;
-    
+
     // Check if renderer is ready to accept frames
     virtual bool is_ready() const = 0;
-    
+
     // Get current buffer consumption rate (frames/second)
     virtual double get_fps() const = 0;
 };
 ```
 
 **Implementations**:
+
 - `MPEGTSRenderer`: Packages frames into MPEG-TS streams
 - `PreviewRenderer`: Displays frames in debug window (OpenGL/SDL)
 - `HeadlessRenderer`: Consumes frames without output (testing)
 
 **Expectations**:
+
 - Renderer must maintain minimum consumption rate to prevent buffer overflow
 - Renderer pulls frames at MasterClock-aligned intervals
 - Renderer must handle frame timing metadata (PTS/DTS) correctly
 
 **Invariants**:
+
 - Renderer must not block decode threads
 - Frame consumption rate must exceed decode rate by ≥ 5% to prevent buffer buildup
 - Renderer must gracefully handle buffer underruns (return false on `pull_frame`)
@@ -166,25 +176,27 @@ public:
 
 **Core Metrics**:
 
-| Metric Name                                | Type    | Labels          | Unit         | Description                                        |
-|--------------------------------------------|---------|-----------------|--------------|-----------------------------------------------------|
-| `retrovue_playout_channel_state`           | Gauge   | `channel`       | enum         | Current channel state: 0=stopped, 1=buffering, 2=ready, 3=error |
-| `retrovue_playout_buffer_depth_frames`     | Gauge   | `channel`       | frames       | Number of frames currently staged in ring buffer    |
-| `retrovue_playout_frame_gap_seconds`       | Gauge   | `channel`       | seconds      | Deviation from MasterClock scheduled PTS            |
-| `retrovue_playout_decode_failure_count`    | Counter | `channel`       | count        | Total decode errors since channel start             |
-| `retrovue_playout_frames_decoded_total`    | Counter | `channel`       | frames       | Total frames successfully decoded                   |
-| `retrovue_playout_frames_dropped_total`    | Counter | `channel`       | frames       | Frames dropped due to buffer overflow               |
-| `retrovue_playout_buffer_underrun_total`   | Counter | `channel`       | count        | Number of buffer underrun events                    |
-| `retrovue_playout_decode_latency_seconds`  | Histogram | `channel`     | seconds      | Time from packet read to frame ready                |
-| `retrovue_playout_channel_uptime_seconds`  | Gauge   | `channel`       | seconds      | Time since channel entered `ready` state            |
+| Metric Name                               | Type      | Labels    | Unit    | Description                                                     |
+| ----------------------------------------- | --------- | --------- | ------- | --------------------------------------------------------------- |
+| `retrovue_playout_channel_state`          | Gauge     | `channel` | enum    | Current channel state: 0=stopped, 1=buffering, 2=ready, 3=error |
+| `retrovue_playout_buffer_depth_frames`    | Gauge     | `channel` | frames  | Number of frames currently staged in ring buffer                |
+| `retrovue_playout_frame_gap_seconds`      | Gauge     | `channel` | seconds | Deviation from MasterClock scheduled PTS                        |
+| `retrovue_playout_decode_failure_count`   | Counter   | `channel` | count   | Total decode errors since channel start                         |
+| `retrovue_playout_frames_decoded_total`   | Counter   | `channel` | frames  | Total frames successfully decoded                               |
+| `retrovue_playout_frames_dropped_total`   | Counter   | `channel` | frames  | Frames dropped due to buffer overflow                           |
+| `retrovue_playout_buffer_underrun_total`  | Counter   | `channel` | count   | Number of buffer underrun events                                |
+| `retrovue_playout_decode_latency_seconds` | Histogram | `channel` | seconds | Time from packet read to frame ready                            |
+| `retrovue_playout_channel_uptime_seconds` | Gauge     | `channel` | seconds | Time since channel entered `ready` state                        |
 
 **Update Frequency**:
+
 - State metrics: Updated immediately on state change
 - Buffer metrics: Updated on every push/pop operation
 - Counters: Incremented atomically
 - Histograms: Sampled per-frame
 
 **Invariants**:
+
 - Metrics must be thread-safe (atomic updates)
 - Metrics endpoint must respond within 100ms
 - All metrics must include `channel` label for multi-channel deployments
@@ -202,29 +214,32 @@ class MasterClock {
 public:
     // Get current UTC time (microseconds since epoch)
     virtual int64_t now_utc_us() const = 0;
-    
+
     // Get current local time (microseconds since epoch)
     virtual int64_t now_local_us() const = 0;
-    
+
     // Convert UTC to local time
     virtual int64_t to_local(int64_t utc_us) const = 0;
-    
+
     // Calculate offset from scheduled time
     virtual int64_t offset_from_schedule(int64_t scheduled_pts) const = 0;
 };
 ```
 
 **Usage**:
+
 - Frame PTS is compared against `now_utc_us()` to compute `frame_gap_seconds`
 - Renderer uses MasterClock to determine when to pull next frame
 - Telemetry uses MasterClock for `channel_uptime_seconds`
 
 **Guarantees**:
+
 - Time never goes backward (monotonic)
 - All returned timestamps are timezone-aware
 - Precision: microsecond resolution
 
 **Invariants**:
+
 - Playout engine must never call system time functions directly (`time()`, `gettimeofday()`, etc.)
 - All timing calculations must use MasterClock
 - Clock skew between runtime and engine must be ≤ 50ms
@@ -240,17 +255,17 @@ graph TD
     CM[ChannelManager] -->|StartChannel| Channel
     CM -->|UpdatePlan| Channel
     CM -->|StopChannel| Channel
-    
+
     Channel -->|owns| Producer[FrameProducer]
     Channel -->|owns| Buffer[FrameRingBuffer]
     Channel -->|references| Renderer
     Channel -->|publishes| Metrics
-    
+
     Producer -->|decodes| Frame
     Producer -->|pushes| Buffer
     Buffer -->|stores| Frame
     Renderer -->|pulls from| Buffer
-    
+
     Producer -->|consumes| Plan
     Producer -->|uses| MasterClock
     Renderer -->|uses| MasterClock
@@ -260,21 +275,25 @@ graph TD
 **Key Relationships**:
 
 1. **Channel → FrameProducer** (1:1 ownership)
+
    - Channel creates and owns producer lifecycle
    - Producer runs in dedicated decode thread
    - Channel stops producer on shutdown
 
 2. **Channel → FrameRingBuffer** (1:1 ownership)
+
    - Channel allocates buffer on startup
    - Buffer size is configurable per channel
    - Channel destroys buffer on shutdown
 
 3. **Channel → FrameRenderer** (N:1 reference)
+
    - Multiple channels may share one Renderer
    - Renderer is owned by playout service
    - Channel holds weak reference
 
 4. **FrameProducer → Plan** (N:1 consumption)
+
    - Producer resolves plan to asset list
    - Multiple producers may use same plan (different channels)
    - Plan is immutable during decode
@@ -336,12 +355,12 @@ The playout engine uses a **multi-threaded, lock-free** architecture:
 
 **Thread Roles**:
 
-| Thread              | Purpose                                      | Count per Channel |
-|---------------------|----------------------------------------------|-------------------|
-| Main / gRPC         | Handles control plane requests               | 1 (shared)        |
-| Decode Worker       | Decodes frames from media assets             | 1                 |
-| Metrics Exporter    | Serves `/metrics` endpoint                   | 1 (shared)        |
-| Renderer (external) | Pulls frames and generates output            | 1 (shared)        |
+| Thread              | Purpose                           | Count per Channel |
+| ------------------- | --------------------------------- | ----------------- |
+| Main / gRPC         | Handles control plane requests    | 1 (shared)        |
+| Decode Worker       | Decodes frames from media assets  | 1                 |
+| Metrics Exporter    | Serves `/metrics` endpoint        | 1 (shared)        |
+| Renderer (external) | Pulls frames and generates output | 1 (shared)        |
 
 **Synchronization**:
 
@@ -353,11 +372,13 @@ The playout engine uses a **multi-threaded, lock-free** architecture:
 **Thread Safety Guarantees**:
 
 1. **Producer thread** (decode):
+
    - Exclusively pushes to FrameRingBuffer
    - Never blocks on buffer full (drops frame and increments counter)
    - Atomically updates decode metrics
 
 2. **Consumer thread** (renderer):
+
    - Exclusively pops from FrameRingBuffer
    - Never blocks on buffer empty (returns false)
    - Atomically updates consumption metrics
@@ -368,6 +389,7 @@ The playout engine uses a **multi-threaded, lock-free** architecture:
    - Safe to call during active decode
 
 **Deadlock Prevention**:
+
 - No nested locks
 - Lock-free buffer eliminates producer-consumer deadlock
 - State transitions use atomic operations
@@ -384,6 +406,7 @@ The playout engine uses a **multi-threaded, lock-free** architecture:
 **Measurement**: `retrovue_playout_frame_gap_seconds`
 
 **Enforcement**: If gap exceeds threshold:
+
 1. Log warning
 2. Increment `retrovue_playout_decode_failure_count`
 3. If gap exceeds 5 seconds, transition to `error` state
@@ -398,6 +421,7 @@ The playout engine uses a **multi-threaded, lock-free** architecture:
 **Maximum depth**: 60 frames (2 seconds @ 30fps)
 
 **Enforcement**:
+
 - Underrun (depth < 30): Transition to `buffering`, inject slate
 - Overflow (depth > 60): Drop incoming frames, increment `retrovue_playout_frames_dropped_total`
 
@@ -408,6 +432,7 @@ The playout engine uses a **multi-threaded, lock-free** architecture:
 **Rule**: All gRPC control methods (`StartChannel`, `UpdatePlan`, `StopChannel`) must be idempotent.
 
 **Examples**:
+
 - `StartChannel` on already-started channel returns success (no-op)
 - `StopChannel` on already-stopped channel returns success (no-op)
 - `UpdatePlan` with same plan_handle is no-op
@@ -421,6 +446,7 @@ The playout engine uses a **multi-threaded, lock-free** architecture:
 **Rule**: Decode failures must not crash the playout engine or other channels.
 
 **Failure Handling**:
+
 1. Catch all decode exceptions within channel worker
 2. Transition channel to `error` state
 3. Log error with asset_uri and error code
@@ -437,6 +463,7 @@ The playout engine uses a **multi-threaded, lock-free** architecture:
 **Rule**: All resources (memory, file handles, decoder contexts) must be released on channel shutdown.
 
 **Resources**:
+
 - FFmpeg contexts (`AVFormatContext`, `AVCodecContext`)
 - Frame buffers (YUV420 data)
 - Thread handles
@@ -450,6 +477,7 @@ The playout engine uses a **multi-threaded, lock-free** architecture:
 **Rule**: Frame PTS must be strictly monotonically increasing within a single asset stream.
 
 **Enforcement**:
+
 - Producer validates PTS on every frame
 - If PTS decreases or duplicates, log error and skip frame
 - Increment `retrovue_playout_decode_failure_count`
@@ -516,22 +544,26 @@ retrovue_playout_channel_uptime_seconds{channel="1"} 514.23
 ### Metric Semantics
 
 **State Encoding**:
+
 - `0` = stopped
 - `1` = buffering
 - `2` = ready
 - `3` = error
 
 **Frame Gap** (`frame_gap_seconds`):
+
 - Positive value: Frame is ahead of schedule (buffer buildup)
 - Negative value: Frame is behind schedule (decode lag)
 - Target: ≤ ±0.016 seconds (16ms)
 
 **Buffer Depth** (`buffer_depth_frames`):
+
 - Healthy range: 30-60 frames
 - Warning: < 30 frames (underrun risk)
 - Critical: < 10 frames (imminent underrun)
 
 **Decode Latency** (`decode_latency_seconds`):
+
 - Measures time from `av_read_frame()` to `push()` completion
 - Target p95: ≤ 25ms
 - Target p99: ≤ 50ms
@@ -549,6 +581,7 @@ retrovue_playout_channel_uptime_seconds{channel="1"} 514.23
 **Compatibility Rules**:
 
 1. **Backward-compatible changes** (patch/minor):
+
    - Add new optional fields to messages
    - Add new metrics
    - Performance improvements
@@ -561,6 +594,7 @@ retrovue_playout_channel_uptime_seconds{channel="1"} 514.23
    - Change state machine behavior
 
 **Version Check**:
+
 - ChannelManager sends `PLAYOUT_API_VERSION` in gRPC metadata
 - Playout engine validates version on every request
 - Mismatch results in `FAILED_PRECONDITION` gRPC status
@@ -572,15 +606,18 @@ retrovue_playout_channel_uptime_seconds{channel="1"} 514.23
 **Authoritative Source**: `proto/retrovue/playout.proto`
 
 **Generation**:
+
 - C++ stubs: `protoc --cpp_out=src/proto/`
 - Python stubs: `protoc --python_out=src/retrovue/proto/`
 
 **Synchronized Releases**:
+
 - Schema changes require coordinated releases of:
   - `retrovue-core` (Python runtime)
   - `retrovue-playout` (C++ engine)
 
 **Validation**:
+
 - CI enforces proto compatibility checks
 - Breaking changes block merge without version bump
 
@@ -590,14 +627,14 @@ retrovue_playout_channel_uptime_seconds{channel="1"} 514.23
 
 ### Error Categories
 
-| Category          | Description                              | Recovery Strategy                  |
-|-------------------|------------------------------------------|------------------------------------|
-| Decode Error      | FFmpeg decode failure (corrupt frame)    | Skip frame, continue decode        |
-| Asset Not Found   | Plan references missing asset            | Transition to error, inject slate  |
-| Buffer Overflow   | Producer outpaces consumer               | Drop frames, log warning           |
-| Buffer Underrun   | Consumer outpaces producer               | Inject slate, transition buffering |
-| Plan Invalid      | Cannot resolve plan_handle               | Return gRPC error, stay stopped    |
-| Thread Crash      | Decode thread exits unexpectedly         | Attempt restart, max 5 retries     |
+| Category        | Description                           | Recovery Strategy                  |
+| --------------- | ------------------------------------- | ---------------------------------- |
+| Decode Error    | FFmpeg decode failure (corrupt frame) | Skip frame, continue decode        |
+| Asset Not Found | Plan references missing asset         | Transition to error, inject slate  |
+| Buffer Overflow | Producer outpaces consumer            | Drop frames, log warning           |
+| Buffer Underrun | Consumer outpaces producer            | Inject slate, transition buffering |
+| Plan Invalid    | Cannot resolve plan_handle            | Return gRPC error, stay stopped    |
+| Thread Crash    | Decode thread exits unexpectedly      | Attempt restart, max 5 retries     |
 
 ---
 
@@ -613,6 +650,7 @@ max_delay = 32 seconds
 ```
 
 **Example Timeline**:
+
 - Attempt 1: Wait 1s
 - Attempt 2: Wait 2s
 - Attempt 3: Wait 4s
@@ -621,11 +659,13 @@ max_delay = 32 seconds
 - Give up, transition to `error` permanently
 
 **Retry Triggers**:
+
 - Decode thread crash
 - Asset open failure
 - Plan resolution failure
 
 **No Retry**:
+
 - Invalid plan_handle (immediate error response)
 - `StopChannel` during retry (cancel retry, stop immediately)
 
@@ -638,6 +678,7 @@ max_delay = 32 seconds
 **Slate Source**: Static PNG image converted to YUV420 loop.
 
 **Activation**:
+
 1. Detect error condition (asset failure, underrun)
 2. Transition to `buffering` state
 3. Start slate injection loop (30fps, repeated frame)
@@ -647,6 +688,7 @@ max_delay = 32 seconds
    - `StopChannel` is called
 
 **Slate Frame**:
+
 - Resolution: Matches channel configuration (e.g., 1920x1080)
 - Format: YUV420 planar
 - Content: "Technical Difficulties" or channel logo
@@ -657,43 +699,46 @@ max_delay = 32 seconds
 
 ### Latency Targets
 
-| Operation         | Target Latency | Measurement                           |
-|-------------------|----------------|---------------------------------------|
-| StartChannel      | ≤ 2s           | gRPC request to first frame delivered |
-| UpdatePlan        | ≤ 500ms        | gRPC request to resumed decode        |
-| StopChannel       | ≤ 1s           | gRPC request to thread joined         |
-| Frame Decode      | ≤ 25ms (p95)   | `decode_latency_seconds` histogram    |
-| Buffer Push       | ≤ 1ms          | `push()` duration                     |
-| Buffer Pop        | ≤ 1ms          | `pop()` duration                      |
-| Metrics Endpoint  | ≤ 100ms        | HTTP GET `/metrics` response time     |
+| Operation        | Target Latency | Measurement                           |
+| ---------------- | -------------- | ------------------------------------- |
+| StartChannel     | ≤ 2s           | gRPC request to first frame delivered |
+| UpdatePlan       | ≤ 500ms        | gRPC request to resumed decode        |
+| StopChannel      | ≤ 1s           | gRPC request to thread joined         |
+| Frame Decode     | ≤ 25ms (p95)   | `decode_latency_seconds` histogram    |
+| Buffer Push      | ≤ 1ms          | `push()` duration                     |
+| Buffer Pop       | ≤ 1ms          | `pop()` duration                      |
+| Metrics Endpoint | ≤ 100ms        | HTTP GET `/metrics` response time     |
 
 ---
 
 ### Throughput Targets
 
-| Metric                    | Target              | Constraint                          |
-|---------------------------|---------------------|-------------------------------------|
-| Decode Throughput         | ≥ 60 fps per channel| Sustained, no frame drops           |
-| Multi-channel Capacity    | ≥ 4 channels        | On 4-core CPU @ 3.0 GHz             |
-| Memory per Channel        | ≤ 100 MB            | Steady state, buffer + decoder      |
-| CPU per Channel (decode)  | ≤ 25% of 1 core     | H.264 1080p30                       |
-| Metrics Update Rate       | ≥ 10 Hz             | Buffer depth, frame gap updates     |
+| Metric                   | Target               | Constraint                      |
+| ------------------------ | -------------------- | ------------------------------- |
+| Decode Throughput        | ≥ 60 fps per channel | Sustained, no frame drops       |
+| Multi-channel Capacity   | ≥ 4 channels         | On 4-core CPU @ 3.0 GHz         |
+| Memory per Channel       | ≤ 100 MB             | Steady state, buffer + decoder  |
+| CPU per Channel (decode) | ≤ 25% of 1 core      | H.264 1080p30                   |
+| Metrics Update Rate      | ≥ 10 Hz              | Buffer depth, frame gap updates |
 
 ---
 
 ### Scalability
 
 **Horizontal Scaling**:
+
 - Run multiple playout engine processes
 - Each process handles 1-4 channels
 - Channels assigned via load balancer or static config
 
 **Vertical Scaling**:
+
 - Decode threads scale with CPU cores
 - Buffer size scales with available memory
 - Metrics endpoint remains single-threaded
 
 **Limits**:
+
 - Max channels per process: 8 (reasonable)
 - Max frame resolution: 4K (3840x2160)
 - Max decode throughput: 240 fps aggregate (all channels)
@@ -705,12 +750,14 @@ max_delay = 32 seconds
 ### Unit Tests
 
 **Coverage Requirements**:
+
 - FrameRingBuffer: 100% line coverage
 - FrameProducer: ≥ 90% line coverage
 - State transitions: All paths tested
 - Error handling: All error codes tested
 
 **Test Files**:
+
 - `tests/test_buffer.cpp`: Ring buffer operations
 - `tests/test_decode.cpp`: FFmpeg decode pipeline
 - `tests/test_metrics.cpp`: Telemetry export
@@ -721,6 +768,7 @@ max_delay = 32 seconds
 ### Integration Tests
 
 **Scenarios**:
+
 1. **Happy path**: Start → Decode → Render → Stop
 2. **Plan update**: Start → Decode → UpdatePlan → Resume → Stop
 3. **Underrun recovery**: Start → Force underrun → Inject slate → Recover
@@ -728,6 +776,7 @@ max_delay = 32 seconds
 5. **Multi-channel**: Start 4 channels → Verify isolation → Stop all
 
 **Validation**:
+
 - Frame PTS monotonicity
 - Buffer depth within bounds
 - Metrics accuracy
@@ -741,6 +790,7 @@ max_delay = 32 seconds
 **Purpose**: Verify gRPC contract compliance with ChannelManager expectations.
 
 **Tests**:
+
 - `test_start_channel_contract.py`: Validates `StartChannel` behavior
 - `test_update_plan_contract.py`: Validates `UpdatePlan` behavior
 - `test_stop_channel_contract.py`: Validates `StopChannel` behavior
@@ -748,6 +798,7 @@ max_delay = 32 seconds
 - `test_telemetry_contract.py`: Validates metrics format and accuracy
 
 **Assertions**:
+
 - Response fields match proto schema
 - State transitions follow state machine
 - Metrics are updated correctly
@@ -776,4 +827,3 @@ max_delay = 32 seconds
 - [Development Standards](../development-standards.md) — C++ project structure and conventions
 - [RetroVue MasterClock](../../Retrovue/docs/domain/MasterClock.md) — Time synchronization contract
 - [RetroVue ChannelManager](../../Retrovue/docs/runtime/ChannelManager.md) — Control plane orchestrator
-

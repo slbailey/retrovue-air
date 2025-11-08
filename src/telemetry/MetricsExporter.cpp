@@ -4,6 +4,7 @@
 // Copyright (c) 2025 RetroVue
 
 #include "retrovue/telemetry/MetricsExporter.h"
+#include "retrovue/telemetry/MetricsHTTPServer.h"
 
 #include <iostream>
 #include <sstream>
@@ -33,7 +34,13 @@ int ChannelStateToValue(ChannelState state) {
 MetricsExporter::MetricsExporter(int port)
     : port_(port),
       running_(false),
-      stop_requested_(false) {
+      stop_requested_(false),
+      http_server_(std::make_unique<MetricsHTTPServer>(port)) {
+  
+  // Set up metrics callback
+  http_server_->SetMetricsCallback([this]() {
+    return this->GenerateMetricsText();
+  });
 }
 
 MetricsExporter::~MetricsExporter() {
@@ -46,11 +53,15 @@ bool MetricsExporter::Start() {
     return false;  // Already running
   }
 
-  stop_requested_.store(false, std::memory_order_release);
-  server_thread_ = std::make_unique<std::thread>(&MetricsExporter::ServerLoop, this);
+  // Start HTTP server
+  if (!http_server_->Start()) {
+    std::cerr << "[MetricsExporter] Failed to start HTTP server" << std::endl;
+    running_.store(false, std::memory_order_release);
+    return false;
+  }
 
-  std::cout << "[MetricsExporter] Started on port " << port_ 
-            << " (stub mode - metrics logged to console)" << std::endl;
+  std::cout << "[MetricsExporter] Started HTTP server on port " << port_ 
+            << " - metrics at http://localhost:" << port_ << "/metrics" << std::endl;
   return true;
 }
 
@@ -60,11 +71,9 @@ void MetricsExporter::Stop() {
   }
 
   std::cout << "[MetricsExporter] Stopping..." << std::endl;
-  stop_requested_.store(true, std::memory_order_release);
-
-  if (server_thread_ && server_thread_->joinable()) {
-    server_thread_->join();
-  }
+  
+  // Stop HTTP server
+  http_server_->Stop();
 
   running_.store(false, std::memory_order_release);
   std::cout << "[MetricsExporter] Stopped" << std::endl;
@@ -90,26 +99,6 @@ bool MetricsExporter::GetChannelMetrics(int32_t channel_id,
   }
   metrics = it->second;
   return true;
-}
-
-void MetricsExporter::ServerLoop() {
-  std::cout << "[MetricsExporter] Server loop started" << std::endl;
-  
-  // Phase 2 Stub: Log metrics periodically instead of serving HTTP
-  // Future: Implement real HTTP server with /metrics endpoint
-  
-  while (!stop_requested_.load(std::memory_order_acquire)) {
-    // Generate and log metrics every 10 seconds
-    std::this_thread::sleep_for(std::chrono::seconds(10));
-    
-    std::string metrics_text = GenerateMetricsText();
-    if (!metrics_text.empty()) {
-      std::cout << "\n[MetricsExporter] Current metrics:\n" 
-                << metrics_text << std::endl;
-    }
-  }
-  
-  std::cout << "[MetricsExporter] Server loop exited" << std::endl;
 }
 
 std::string MetricsExporter::GenerateMetricsText() const {

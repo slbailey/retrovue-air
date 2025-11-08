@@ -30,6 +30,9 @@ PlayoutControlImpl::~PlayoutControlImpl() {
   std::lock_guard<std::mutex> lock(channels_mutex_);
   for (auto& [channel_id, worker] : active_channels_) {
     std::cout << "[PlayoutControlImpl] Stopping channel " << channel_id << std::endl;
+    if (worker->renderer) {
+      worker->renderer->Stop();
+    }
     if (worker->producer) {
       worker->producer->Stop();
     }
@@ -72,7 +75,7 @@ grpc::Status PlayoutControlImpl::StartChannel(grpc::ServerContext* context,
   producer_config.target_width = 1920;
   producer_config.target_height = 1080;
   producer_config.target_fps = 30.0;
-  producer_config.stub_mode = true;  // Phase 2: use stub frames
+  producer_config.stub_mode = false;  // Phase 3: real decode (falls back to stub if FFmpeg unavailable)
 
   // Create producer
   worker->producer = std::make_unique<decode::FrameProducer>(
@@ -83,6 +86,23 @@ grpc::Status PlayoutControlImpl::StartChannel(grpc::ServerContext* context,
     response->set_success(false);
     response->set_message("Failed to start frame producer");
     return grpc::Status(grpc::StatusCode::INTERNAL, "Producer start failed");
+  }
+
+  // Configure and create renderer (Phase 3)
+  renderer::RenderConfig render_config;
+  render_config.mode = renderer::RenderMode::HEADLESS;  // Default to headless mode
+  render_config.window_width = 1920;
+  render_config.window_height = 1080;
+  render_config.window_title = "RetroVue Channel " + std::to_string(channel_id);
+
+  worker->renderer = renderer::FrameRenderer::Create(render_config, *worker->ring_buffer);
+
+  // Start render thread
+  if (!worker->renderer->Start()) {
+    std::cerr << "[StartChannel] WARNING: Failed to start renderer, continuing without it" 
+              << std::endl;
+    // Don't fail the entire StartChannel operation if renderer fails
+    // Producer will fill buffer, it just won't be consumed
   }
 
   // Update metrics
@@ -126,9 +146,14 @@ grpc::Status PlayoutControlImpl::UpdatePlan(grpc::ServerContext* context,
 
   auto& worker = it->second;
 
-  // Phase 2: Hot-swap by stopping and restarting producer
+  // Phase 3: Hot-swap by stopping and restarting producer and renderer
   // Future optimization: seamless transition without stopping
-  std::cout << "[UpdatePlan] Stopping current producer..." << std::endl;
+  std::cout << "[UpdatePlan] Stopping current producer and renderer..." << std::endl;
+  
+  if (worker->renderer) {
+    worker->renderer->Stop();
+  }
+  
   if (worker->producer) {
     worker->producer->Stop();
   }
@@ -147,7 +172,7 @@ grpc::Status PlayoutControlImpl::UpdatePlan(grpc::ServerContext* context,
   producer_config.target_width = 1920;
   producer_config.target_height = 1080;
   producer_config.target_fps = 30.0;
-  producer_config.stub_mode = true;
+  producer_config.stub_mode = false;  // Phase 3: real decode
 
   worker->producer = std::make_unique<decode::FrameProducer>(
       producer_config, *worker->ring_buffer);
@@ -164,6 +189,13 @@ grpc::Status PlayoutControlImpl::UpdatePlan(grpc::ServerContext* context,
     }
     
     return grpc::Status(grpc::StatusCode::INTERNAL, "Producer restart failed");
+  }
+
+  // Restart renderer
+  if (worker->renderer) {
+    if (!worker->renderer->Start()) {
+      std::cerr << "[UpdatePlan] WARNING: Failed to restart renderer" << std::endl;
+    }
   }
 
   // Update metrics
@@ -195,7 +227,13 @@ grpc::Status PlayoutControlImpl::StopChannel(grpc::ServerContext* context,
 
   auto& worker = it->second;
 
-  // Stop frame producer
+  // Stop renderer first (consumer)
+  if (worker->renderer) {
+    std::cout << "[StopChannel] Stopping renderer for channel " << channel_id << std::endl;
+    worker->renderer->Stop();
+  }
+
+  // Stop frame producer (producer)
   if (worker->producer) {
     std::cout << "[StopChannel] Stopping producer for channel " << channel_id << std::endl;
     worker->producer->Stop();
