@@ -3,7 +3,7 @@
 > **Related:**  
 > [Architecture Overview](../architecture/ArchitectureOverview.md)  
 > [Playout Engine Contract](../contracts/PlayoutEngineContract.md)  
-> [Phase 1 Skeleton](../milestones/Phase1_Skeleton.md)
+> [Phase 1 Complete](Phase1_Complete.md)
 
 ---
 

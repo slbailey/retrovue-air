@@ -1,6 +1,6 @@
 # Phase 2 – Decode & Frame Bus Integration - COMPLETE
 
-_Related: [Phase 2 Goals](docs/developer/Phase2_Goals.md) • [Phase 1 Skeleton](PHASE1_SKELETON.md) • [PROJECT_OVERVIEW](docs/PROJECT_OVERVIEW.md)_
+_Related: [Phase 2 Plan](Phase2_Plan.md) • [Phase 1 Complete](Phase1_Complete.md) • [PROJECT_OVERVIEW](../PROJECT_OVERVIEW.md)_
 
 ---
 
@@ -336,10 +336,9 @@ tests/
 ├── test_buffer.cpp         (206 lines)
 └── test_decode.cpp         (249 lines)
 
-docs/developer/
-└── Phase2_Goals.md         (108 lines)
-
-PHASE2_COMPLETE.md          (this file)
+docs/milestones/
+├── Phase2_Plan.md          (128 lines)
+└── Phase2_Complete.md      (this file)
 ```
 
 ### Modified Files
@@ -374,5 +373,5 @@ The RetroVue Playout Engine now has:
 
 ---
 
-_For Phase 3 planning, see: [Architecture Overview](docs/architecture/ArchitectureOverview.md) and [Playout Contract](docs/contracts/PlayoutContract.md)_
+_For Phase 3 planning, see: [Architecture Overview](../architecture/ArchitectureOverview.md) and [Playout Engine Contract](../contracts/PlayoutEngineContract.md)_
 

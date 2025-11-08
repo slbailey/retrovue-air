@@ -13,12 +13,14 @@ This contract defines the **rendering** and **HTTP telemetry** subsystems within
 ### Key Responsibilities
 
 **FrameRenderer:**
+
 - Consume frames from `FrameRingBuffer` in dedicated render thread
 - Support multiple render modes: headless (production) and preview (debug)
 - Track frame timing and render performance statistics
 - Provide graceful degradation when buffer empty
 
 **MetricsHTTPServer:**
+
 - Serve Prometheus-compatible metrics over HTTP
 - Provide non-blocking, thread-safe metrics access
 - Support concurrent metric queries
@@ -130,7 +132,7 @@ class FrameRenderer {
   RenderConfig config_;
   buffer::FrameRingBuffer& input_buffer_;
   RenderStats stats_;
-  
+
   std::atomic<bool> running_;
   std::atomic<bool> stop_requested_;
   std::unique_ptr<std::thread> render_thread_;
@@ -141,13 +143,13 @@ class FrameRenderer {
 
 ### Frame Timing Rules
 
-| Rule | Specification | Rationale |
-|------|---------------|-----------|
-| **Pop Timeout** | 5ms sleep on empty buffer | Prevents busy-wait CPU waste |
-| **Frame Gap Calculation** | `now - last_frame_time` in ms | Tracks actual render intervals |
-| **Stats Update** | After every frame render | Real-time performance monitoring |
-| **Periodic Logging** | Every 100 frames | Prevents log spam |
-| **EMA Alpha** | 0.1 for average render time | Smooth out transient spikes |
+| Rule                      | Specification                 | Rationale                        |
+| ------------------------- | ----------------------------- | -------------------------------- |
+| **Pop Timeout**           | 5ms sleep on empty buffer     | Prevents busy-wait CPU waste     |
+| **Frame Gap Calculation** | `now - last_frame_time` in ms | Tracks actual render intervals   |
+| **Stats Update**          | After every frame render      | Real-time performance monitoring |
+| **Periodic Logging**      | Every 100 frames              | Prevents log spam                |
+| **EMA Alpha**             | 0.1 for average render time   | Smooth out transient spikes      |
 
 ### Buffer Consumption Contract
 
@@ -181,6 +183,7 @@ while (!stop_requested_) {
 ```
 
 **Guarantees:**
+
 - MUST NOT block indefinitely on Pop()
 - MUST update `frames_skipped` when buffer empty
 - MUST calculate frame gap for every successful pop
@@ -192,23 +195,24 @@ while (!stop_requested_) {
 
 ### Mode Comparison
 
-| Feature | HeadlessRenderer | PreviewRenderer |
-|---------|------------------|-----------------|
-| **Display Output** | None | SDL2 window |
-| **Use Case** | Production playout | Debug/development |
-| **Frame Processing** | Validation only | YUV420 → SDL texture |
-| **Render Time** | ~0.1ms | ~2-5ms (1080p) |
-| **Dependencies** | None | SDL2 library |
-| **Compilation Flag** | Always available | `RETROVUE_SDL2_AVAILABLE` |
-| **Fallback** | N/A | HeadlessRenderer if SDL2 missing |
-| **Thread Safety** | Single render thread | Single render thread |
-| **Memory** | Minimal | ~6MB (SDL textures) |
+| Feature              | HeadlessRenderer     | PreviewRenderer                  |
+| -------------------- | -------------------- | -------------------------------- |
+| **Display Output**   | None                 | SDL2 window                      |
+| **Use Case**         | Production playout   | Debug/development                |
+| **Frame Processing** | Validation only      | YUV420 → SDL texture             |
+| **Render Time**      | ~0.1ms               | ~2-5ms (1080p)                   |
+| **Dependencies**     | None                 | SDL2 library                     |
+| **Compilation Flag** | Always available     | `RETROVUE_SDL2_AVAILABLE`        |
+| **Fallback**         | N/A                  | HeadlessRenderer if SDL2 missing |
+| **Thread Safety**    | Single render thread | Single render thread             |
+| **Memory**           | Minimal              | ~6MB (SDL textures)              |
 
 ### HeadlessRenderer Specification
 
 **Purpose:** Validate pipeline operation without display hardware.
 
 **Behavior:**
+
 ```cpp
 bool HeadlessRenderer::Initialize() {
     std::cout << "[HeadlessRenderer] Initialized (no display output)" << std::endl;
@@ -221,7 +225,7 @@ void HeadlessRenderer::RenderFrame(const buffer::Frame& frame) {
     //  - Frame data is present (frame.data.size() > 0)
     //  - Metadata is valid (pts, width, height)
     //  - Buffer consumption timing
-    // 
+    //
     // In production, this would push to:
     //  - SDI output hardware
     //  - Network streaming encoder
@@ -234,6 +238,7 @@ void HeadlessRenderer::Cleanup() {
 ```
 
 **Guarantees:**
+
 - ✅ Never fails initialization
 - ✅ Consumes frames at full speed
 - ✅ No external dependencies
@@ -244,6 +249,7 @@ void HeadlessRenderer::Cleanup() {
 **Purpose:** Visual debugging of decoded frames.
 
 **Behavior:**
+
 ```cpp
 bool PreviewRenderer::Initialize() {
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
@@ -258,7 +264,7 @@ bool PreviewRenderer::Initialize() {
                                 config_.window_height,
                                 SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     // ... create renderer and texture for YUV420P ...
-    
+
     return window_ != nullptr && renderer_ != nullptr && texture_ != nullptr;
 }
 
@@ -293,6 +299,7 @@ void PreviewRenderer::Cleanup() {
 ```
 
 **Conditional Compilation:**
+
 ```cpp
 #ifdef RETROVUE_SDL2_AVAILABLE
     // Full SDL2 implementation
@@ -306,6 +313,7 @@ void PreviewRenderer::Cleanup() {
 ```
 
 **Guarantees:**
+
 - ✅ Graceful fallback to HeadlessRenderer if SDL2 unavailable
 - ✅ Window closes cleanly trigger stop
 - ✅ YUV420P format support (no conversion needed)
@@ -322,12 +330,14 @@ void PreviewRenderer::Cleanup() {
 **Purpose:** Prometheus text exposition format
 
 **Request:**
+
 ```http
 GET /metrics HTTP/1.1
 Host: localhost:9308
 ```
 
 **Response (Success):**
+
 ```http
 HTTP/1.1 200 OK
 Content-Type: text/plain; version=0.0.4; charset=utf-8
@@ -352,6 +362,7 @@ retrovue_playout_decode_failure_count{channel="1"} 0
 ```
 
 **Guarantees:**
+
 - MUST respond within 1 second
 - MUST include `Content-Type: text/plain; version=0.0.4`
 - MUST close connection after response
@@ -362,6 +373,7 @@ retrovue_playout_decode_failure_count{channel="1"} 0
 **Purpose:** Server info page
 
 **Response:**
+
 ```http
 HTTP/1.1 200 OK
 Content-Type: text/plain
@@ -375,6 +387,7 @@ Metrics available at: /metrics
 #### Other Paths
 
 **Response:**
+
 ```http
 HTTP/1.1 404 Not Found
 Content-Type: text/plain
@@ -411,6 +424,7 @@ while (!stop_requested_) {
 ```
 
 **Threading Guarantees:**
+
 - ✅ Single server thread per `MetricsHTTPServer` instance
 - ✅ Sequential request handling (one at a time)
 - ✅ Non-blocking accept with 100ms poll interval
@@ -433,13 +447,13 @@ class MetricsHTTPServer {
  public:
   // Set callback before Start()
   void SetMetricsCallback(MetricsCallback callback);
-  
+
   bool Start();  // Launches server thread
   void Stop();   // Signals stop and joins thread
-  
+
  private:
   MetricsCallback metrics_callback_;  // std::function<std::string()>
-  
+
   std::string GenerateResponse(const std::string& path) {
       if (path == "/metrics") {
           std::string metrics = metrics_callback_();  // Call user callback
@@ -451,6 +465,7 @@ class MetricsHTTPServer {
 ```
 
 **Usage:**
+
 ```cpp
 auto http_server = std::make_unique<MetricsHTTPServer>(9308);
 
@@ -463,6 +478,7 @@ http_server->Start();  // Server thread begins accepting
 ```
 
 **Callback Contract:**
+
 - MUST be thread-safe (called from server thread)
 - MUST return quickly (<10ms) to avoid blocking server
 - MUST return valid Prometheus text or empty string
@@ -502,14 +518,14 @@ UpdateChannelMetrics(channel_id);
 
 **Integration Rules:**
 
-| Rule | Specification | Enforcement |
-|------|---------------|-------------|
-| **Creation Order** | Buffer → Producer → Renderer | Compile-time (constructor dependencies) |
-| **Start Order** | Producer → Renderer | Runtime (explicit sequencing) |
-| **Stop Order** | Renderer → Producer | Runtime (MUST stop consumer before producer) |
-| **Renderer Failure** | Non-fatal warning | Producer continues, buffer fills |
-| **Producer Failure** | Fatal error | StartChannel returns INTERNAL error |
-| **Mode Selection** | Headless default | Override via config for debug |
+| Rule                 | Specification                | Enforcement                                  |
+| -------------------- | ---------------------------- | -------------------------------------------- |
+| **Creation Order**   | Buffer → Producer → Renderer | Compile-time (constructor dependencies)      |
+| **Start Order**      | Producer → Renderer          | Runtime (explicit sequencing)                |
+| **Stop Order**       | Renderer → Producer          | Runtime (MUST stop consumer before producer) |
+| **Renderer Failure** | Non-fatal warning            | Producer continues, buffer fills             |
+| **Producer Failure** | Fatal error                  | StartChannel returns INTERNAL error          |
+| **Mode Selection**   | Headless default             | Override via config for debug                |
 
 ### Update Plan Hot-Swap
 
@@ -541,6 +557,7 @@ if (worker->renderer) {
 ```
 
 **Hot-Swap Guarantees:**
+
 - ✅ No deadlock (stop consumer before producer)
 - ✅ Buffer cleared between plans
 - ✅ Renderer survives plan changes
@@ -568,6 +585,7 @@ metrics_exporter_->RemoveChannel(channel_id);
 ```
 
 **Shutdown Guarantees:**
+
 - ✅ Threads joined before destruction
 - ✅ No leaked threads
 - ✅ Metrics cleaned up
@@ -587,29 +605,30 @@ TEST(FrameRendererTest, HeadlessRenderRate) {
     FrameRingBuffer buffer(60);
     RenderConfig config;
     config.mode = RenderMode::HEADLESS;
-    
+
     auto renderer = FrameRenderer::Create(config, buffer);
     renderer->Start();
-    
+
     // Fill buffer with 300 frames
     for (int i = 0; i < 300; ++i) {
         Frame frame = CreateTestFrame(i);
         ASSERT_TRUE(buffer.Push(frame));
     }
-    
+
     // Wait for consumption
     std::this_thread::sleep_for(std::chrono::seconds(1));
-    
+
     // Verify
     const auto& stats = renderer->GetStats();
     EXPECT_GT(stats.frames_rendered, 200);  // Should consume most frames
     EXPECT_LT(stats.average_render_time_ms, 1.0);  // Headless is fast
-    
+
     renderer->Stop();
 }
 ```
 
 **Guarantees:**
+
 - Headless renderer MUST process >200 fps
 - Average render time MUST be <1ms
 - Preview renderer MUST process >20 fps (with SDL2)
@@ -624,32 +643,33 @@ TEST(PipelineTest, DecodeToRenderLatency) {
     FrameRingBuffer buffer(60);
     ProducerConfig prod_config;
     prod_config.stub_mode = true;  // Predictable timing
-    
+
     auto producer = std::make_unique<FrameProducer>(prod_config, buffer);
     auto renderer = FrameRenderer::Create(RenderConfig{HEADLESS}, buffer);
-    
+
     // Measure
     producer->Start();
     renderer->Start();
-    
+
     auto start = steady_clock::now();
     std::this_thread::sleep_for(std::chrono::seconds(2));
     auto end = steady_clock::now();
-    
+
     // Verify
     double elapsed_s = duration_cast<seconds>(end - start);
     uint64_t rendered = renderer->GetStats().frames_rendered;
     double fps = rendered / elapsed_s;
-    
+
     EXPECT_GT(fps, 25.0);  // Should maintain ~30fps with headroom
     EXPECT_LT(fps, 35.0);
-    
+
     producer->Stop();
     renderer->Stop();
 }
 ```
 
 **Guarantees:**
+
 - End-to-end latency MUST be <100ms (buffer + processing)
 - Frame rate MUST match producer rate ±20%
 - No dropped frames under normal load
@@ -663,31 +683,32 @@ TEST(MetricsHTTPServerTest, MetricsEndpoint) {
     // Setup
     MetricsHTTPServer server(9308);
     bool callback_called = false;
-    
+
     server.SetMetricsCallback([&callback_called]() {
         callback_called = true;
         return "# Test metric\ntest_value 42\n";
     });
-    
+
     ASSERT_TRUE(server.Start());
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    
+
     // Query endpoint
     auto response = HttpGet("http://localhost:9308/metrics");
-    
+
     // Verify
     EXPECT_EQ(response.status_code, 200);
     EXPECT_TRUE(response.headers.count("Content-Type"));
-    EXPECT_EQ(response.headers["Content-Type"], 
+    EXPECT_EQ(response.headers["Content-Type"],
               "text/plain; version=0.0.4; charset=utf-8");
     EXPECT_TRUE(response.body.find("test_value 42") != std::string::npos);
     EXPECT_TRUE(callback_called);
-    
+
     server.Stop();
 }
 ```
 
 **Guarantees:**
+
 - MUST respond within 1 second
 - MUST include correct Content-Type header
 - MUST call metrics callback
@@ -701,14 +722,14 @@ TEST(MetricsHTTPServerTest, MetricsEndpoint) {
 TEST(MetricsHTTPServerTest, ConcurrentQueries) {
     MetricsHTTPServer server(9308);
     std::atomic<int> callback_count{0};
-    
+
     server.SetMetricsCallback([&callback_count]() {
         callback_count++;
         return "test_metric 1\n";
     });
-    
+
     server.Start();
-    
+
     // Fire 10 concurrent queries
     std::vector<std::future<HttpResponse>> futures;
     for (int i = 0; i < 10; ++i) {
@@ -716,19 +737,20 @@ TEST(MetricsHTTPServerTest, ConcurrentQueries) {
             return HttpGet("http://localhost:9308/metrics");
         }));
     }
-    
+
     // Wait for all
     for (auto& f : futures) {
         auto response = f.get();
         EXPECT_EQ(response.status_code, 200);
     }
-    
+
     EXPECT_EQ(callback_count, 10);  // All callbacks executed
     server.Stop();
 }
 ```
 
 **Guarantees:**
+
 - MUST handle sequential concurrent queries
 - MUST NOT corrupt responses
 - MUST call callback once per query
@@ -740,23 +762,23 @@ TEST(MetricsHTTPServerTest, ConcurrentQueries) {
 
 ### Renderer Failures
 
-| Failure | Detection | Recovery |
-|---------|-----------|----------|
-| **SDL2 unavailable** | `Initialize()` returns false | Fallback to HeadlessRenderer |
-| **Window closed by user** | SDL_QUIT event | `stop_requested_ = true` |
-| **Buffer perpetually empty** | `frames_skipped` > threshold | Log warning, continue |
-| **Render thread crash** | Exception in `RenderLoop()` | Thread exits, `IsRunning() = false` |
+| Failure                      | Detection                    | Recovery                            |
+| ---------------------------- | ---------------------------- | ----------------------------------- |
+| **SDL2 unavailable**         | `Initialize()` returns false | Fallback to HeadlessRenderer        |
+| **Window closed by user**    | SDL_QUIT event               | `stop_requested_ = true`            |
+| **Buffer perpetually empty** | `frames_skipped` > threshold | Log warning, continue               |
+| **Render thread crash**      | Exception in `RenderLoop()`  | Thread exits, `IsRunning() = false` |
 
 **Contract:** Renderer failure MUST NOT crash playout engine. Producer continues, buffer may fill.
 
 ### HTTP Server Failures
 
-| Failure | Detection | Recovery |
-|---------|-----------|----------|
-| **Port already in use** | `bind()` fails | `Start()` returns false |
-| **Callback exception** | Catch in `GenerateResponse()` | Return 500 Internal Server Error |
-| **Client timeout** | `recv()` timeout | Close connection, continue |
-| **Malformed request** | Parse error | Return 400 Bad Request |
+| Failure                 | Detection                     | Recovery                         |
+| ----------------------- | ----------------------------- | -------------------------------- |
+| **Port already in use** | `bind()` fails                | `Start()` returns false          |
+| **Callback exception**  | Catch in `GenerateResponse()` | Return 500 Internal Server Error |
+| **Client timeout**      | `recv()` timeout              | Close connection, continue       |
+| **Malformed request**   | Parse error                   | Return 400 Bad Request           |
 
 **Contract:** HTTP server failure MUST NOT affect playout operations. Metrics may be unavailable.
 
@@ -766,44 +788,43 @@ TEST(MetricsHTTPServerTest, ConcurrentQueries) {
 
 ### Renderer Performance
 
-| Metric | HeadlessRenderer | PreviewRenderer |
-|--------|------------------|-----------------|
-| **Max Render Time** | 1ms | 10ms |
-| **Target FPS** | 60+ | 30+ |
-| **CPU Usage** | <1% per channel | <5% per channel |
-| **Memory** | <1MB | <10MB (SDL textures) |
-| **Startup Time** | <10ms | <500ms (SDL init) |
+| Metric              | HeadlessRenderer | PreviewRenderer      |
+| ------------------- | ---------------- | -------------------- |
+| **Max Render Time** | 1ms              | 10ms                 |
+| **Target FPS**      | 60+              | 30+                  |
+| **CPU Usage**       | <1% per channel  | <5% per channel      |
+| **Memory**          | <1MB             | <10MB (SDL textures) |
+| **Startup Time**    | <10ms            | <500ms (SDL init)    |
 
 ### HTTP Server Performance
 
-| Metric | Requirement |
-|--------|-------------|
-| **Request Latency** | <1ms (avg), <10ms (p99) |
-| **Concurrent Queries** | 5 (listen backlog) |
-| **Throughput** | 100+ req/s (single-threaded) |
-| **Memory** | <1KB per request |
-| **Startup Time** | <100ms |
+| Metric                 | Requirement                  |
+| ---------------------- | ---------------------------- |
+| **Request Latency**    | <1ms (avg), <10ms (p99)      |
+| **Concurrent Queries** | 5 (listen backlog)           |
+| **Throughput**         | 100+ req/s (single-threaded) |
+| **Memory**             | <1KB per request             |
+| **Startup Time**       | <100ms                       |
 
 ---
 
 ## 🔄 Version History
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.0 | 2025-11-08 | Initial contract defining FrameRenderer and MetricsHTTPServer |
+| Version | Date       | Changes                                                       |
+| ------- | ---------- | ------------------------------------------------------------- |
+| 1.0     | 2025-11-08 | Initial contract defining FrameRenderer and MetricsHTTPServer |
 
 ---
 
 ## 📚 Related Contracts
 
-- [PlayoutDomainContract.md](PlayoutDomainContract.md) - Core channel lifecycle
-- [MetricsAndTimingContract.md](MetricsAndTimingContract.md) - Metrics aggregation
-- [PHASE3_PLAN.md](../../PHASE3_PLAN.md) - Implementation roadmap
-- [PHASE3_PART2_COMPLETE.md](../../PHASE3_PART2_COMPLETE.md) - Implementation details
+- [PlayoutEngine.md](PlayoutEngine.md) - Core channel lifecycle
+- [MetricsAndTimingDomain.md](MetricsAndTimingDomain.md) - Metrics aggregation and timing contract
+- [Phase3_Plan.md](../milestones/Phase3_Plan.md) - Implementation roadmap
+- [Phase3_Part2_Complete.md](../milestones/Phase3_Part2_Complete.md) - Implementation details
 
 ---
 
 **Contract Authority:** RetroVue Architecture Team  
 **Implementation Status:** ✅ Complete (Phase 3 Part 2)  
 **Test Coverage:** ✅ All integration tests passing
-

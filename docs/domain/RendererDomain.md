@@ -1,6 +1,6 @@
 # 🎬 Renderer Domain
 
-_Related: [RendererAndHTTPContract](RendererAndHTTPContract.md) • [PlayoutDomainContract](PlayoutDomainContract.md) • [Phase 3 Plan](../../PHASE3_PLAN.md)_
+_Related: [Playout Engine Domain](PlayoutEngineDomain.md) • [Renderer Contract](../contracts/RendererContract.md) • [Metrics and Timing Domain](MetricsAndTimingDomain.md) • [Phase 3 Plan](../milestones/Phase3_Plan.md)_
 
 ---
 
@@ -48,6 +48,7 @@ The RetroVue Playout Engine provides two renderer implementations, selected at c
 **Purpose**: Production playout without visual output
 
 **Use Cases**:
+
 - Broadcasting to SDI/NDI hardware
 - Network streaming (RTMP, SRT)
 - Background recording pipelines
@@ -55,6 +56,7 @@ The RetroVue Playout Engine provides two renderer implementations, selected at c
 - Headless server deployments
 
 **Characteristics**:
+
 ```
 ┌─────────────────────────────────────┐
 │       HeadlessRenderer              │
@@ -90,6 +92,7 @@ Dependencies: None
 ```
 
 **Key Features**:
+
 - ✅ Zero external dependencies
 - ✅ Ultra-low latency (<1ms per frame)
 - ✅ Minimal CPU and memory footprint
@@ -101,6 +104,7 @@ Dependencies: None
 **Purpose**: Visual debugging and development
 
 **Use Cases**:
+
 - Development and testing
 - Operator preview monitors
 - Quality assurance validation
@@ -108,6 +112,7 @@ Dependencies: None
 - Demo and presentation scenarios
 
 **Characteristics**:
+
 ```
 ┌─────────────────────────────────────┐
 │       PreviewRenderer               │
@@ -146,6 +151,7 @@ Dependencies: SDL2 library
 ```
 
 **Key Features**:
+
 - ✅ Real-time visual feedback
 - ✅ Native YUV420 rendering (no conversion)
 - ✅ VSYNC support for smooth playback
@@ -154,16 +160,16 @@ Dependencies: SDL2 library
 
 ### Variant Comparison
 
-| Aspect | HeadlessRenderer | PreviewRenderer |
-|--------|------------------|-----------------|
-| **Output** | None (validation only) | SDL2 window |
-| **Latency** | ~0.1ms | ~2-5ms |
-| **CPU** | <1% | ~5% |
-| **Memory** | <1MB | ~10MB |
-| **Dependencies** | None | SDL2 |
-| **Use Case** | Production | Debug/QA |
-| **Compilation** | Always available | Requires `RETROVUE_SDL2_AVAILABLE` |
-| **Fallback** | N/A | HeadlessRenderer if SDL2 missing |
+| Aspect           | HeadlessRenderer       | PreviewRenderer                    |
+| ---------------- | ---------------------- | ---------------------------------- |
+| **Output**       | None (validation only) | SDL2 window                        |
+| **Latency**      | ~0.1ms                 | ~2-5ms                             |
+| **CPU**          | <1%                    | ~5%                                |
+| **Memory**       | <1MB                   | ~10MB                              |
+| **Dependencies** | None                   | SDL2                               |
+| **Use Case**     | Production             | Debug/QA                           |
+| **Compilation**  | Always available       | Requires `RETROVUE_SDL2_AVAILABLE` |
+| **Fallback**     | N/A                    | HeadlessRenderer if SDL2 missing   |
 
 ---
 
@@ -174,6 +180,7 @@ Dependencies: SDL2 library
 The renderer operates in real-time, consuming frames as they become available without artificial delays (except for VSYNC in preview mode).
 
 **Non-Blocking Consumption**:
+
 ```cpp
 while (!stop_requested_) {
     Frame frame;
@@ -183,12 +190,13 @@ while (!stop_requested_) {
         stats_.frames_skipped++;
         continue;  // Never deadlock waiting for frames
     }
-    
+
     RenderFrame(frame);  // Consume immediately
 }
 ```
 
 **Guarantees**:
+
 - Renderer NEVER blocks indefinitely on buffer
 - 5ms sleep prevents busy-wait CPU waste
 - Tracks skipped frames when buffer empty
@@ -199,6 +207,7 @@ while (!stop_requested_) {
 The renderer minimizes latency between frame availability and consumption to maintain real-time responsiveness.
 
 **Latency Budget**:
+
 ```
 Frame Available (buffer) → Pop → Render → Complete
      0ms                    <0.1ms  <5ms    <5.1ms total
@@ -210,6 +219,7 @@ Components:
 ```
 
 **Optimization Techniques**:
+
 - Lock-free buffer operations (atomic indices)
 - Single render thread per channel (no context switching)
 - Zero-copy frame data (reference semantics)
@@ -221,14 +231,15 @@ The renderer handles adverse conditions without crashing or blocking the pipelin
 
 **Failure Modes & Responses**:
 
-| Condition | Detection | Response | Impact |
-|-----------|-----------|----------|--------|
-| **Buffer Empty** | Pop returns false | Sleep 5ms, increment `frames_skipped` | Temporary output gap |
-| **SDL2 Unavailable** | Initialize fails | Fallback to HeadlessRenderer | No visual output |
-| **Window Closed** | SDL_QUIT event | Set `stop_requested_`, exit gracefully | Renderer stops |
-| **Slow Render** | Render time > threshold | Log warning, continue | Possible frame drops |
+| Condition            | Detection               | Response                               | Impact               |
+| -------------------- | ----------------------- | -------------------------------------- | -------------------- |
+| **Buffer Empty**     | Pop returns false       | Sleep 5ms, increment `frames_skipped`  | Temporary output gap |
+| **SDL2 Unavailable** | Initialize fails        | Fallback to HeadlessRenderer           | No visual output     |
+| **Window Closed**    | SDL_QUIT event          | Set `stop_requested_`, exit gracefully | Renderer stops       |
+| **Slow Render**      | Render time > threshold | Log warning, continue                  | Possible frame drops |
 
 **Non-Fatal Renderer**:
+
 ```cpp
 // In PlayoutService::StartChannel():
 if (!worker->renderer->Start()) {
@@ -265,6 +276,7 @@ FrameRingBuffer                    FrameRenderer
 ```
 
 **Contract**:
+
 - Renderer calls `buffer.Pop(frame)` in tight loop
 - Returns false when buffer empty (non-blocking)
 - Never modifies buffer state except read index
@@ -294,6 +306,7 @@ channel_metrics.frame_gap_seconds = render_stats.frame_gap_ms / 1000.0;
 ```
 
 **Metrics Provided**:
+
 - `frames_rendered`: Total frames consumed
 - `frames_skipped`: Buffer empty events
 - `average_render_time_ms`: Rendering latency
@@ -328,6 +341,7 @@ StopChannel():
 ```
 
 **Integration Contract**:
+
 - Renderer created AFTER buffer and producer
 - Renderer stopped BEFORE producer (consumer before producer)
 - Renderer failure non-fatal (warning logged, producer continues)
@@ -371,20 +385,21 @@ Each channel's renderer runs in its own dedicated thread, independent of the dec
 
 ### Thread Characteristics
 
-| Aspect | Specification |
-|--------|---------------|
-| **Creation** | `std::thread` in `FrameRenderer::Start()` |
-| **Entry Point** | `FrameRenderer::RenderLoop()` (protected method) |
-| **Lifetime** | Created on Start(), joined on Stop() |
-| **Priority** | Normal (OS default) |
-| **CPU Affinity** | None (OS scheduler decides) |
-| **Stack Size** | OS default (~1MB on most platforms) |
+| Aspect           | Specification                                    |
+| ---------------- | ------------------------------------------------ |
+| **Creation**     | `std::thread` in `FrameRenderer::Start()`        |
+| **Entry Point**  | `FrameRenderer::RenderLoop()` (protected method) |
+| **Lifetime**     | Created on Start(), joined on Stop()             |
+| **Priority**     | Normal (OS default)                              |
+| **CPU Affinity** | None (OS scheduler decides)                      |
+| **Stack Size**   | OS default (~1MB on most platforms)              |
 
 ### Synchronization Logic
 
 The renderer uses minimal synchronization to maximize performance:
 
 **Atomic Operations**:
+
 ```cpp
 // Buffer read/write coordination (lock-free)
 std::atomic<uint32_t> FrameRingBuffer::read_index_;
@@ -400,12 +415,14 @@ std::atomic<uint64_t> FrameRenderer::frames_skipped_;
 ```
 
 **No Mutexes in Hot Path**:
+
 - Buffer Pop() uses only atomic compare-and-swap
 - Statistics use atomic increments
 - No condition variables or locks in render loop
 - Thread join only at shutdown (not in steady-state)
 
 **Memory Ordering**:
+
 ```cpp
 // Stop signal (sequentially consistent)
 stop_requested_.store(true, std::memory_order_release);
@@ -424,17 +441,17 @@ The renderer derives timing from **frame metadata** (PTS) rather than wall-clock
 // Frame timing from metadata
 void FrameRenderer::RenderLoop() {
     auto last_frame_time = steady_clock::now();
-    
+
     while (!stop_requested_) {
         Frame frame;
         if (buffer.Pop(frame)) {
             auto now = steady_clock::now();
             double frame_gap_ms = duration<ms>(now - last_frame_time);
             last_frame_time = now;
-            
+
             // Render frame (timing controlled by buffer availability)
             RenderFrame(frame);
-            
+
             // Stats based on actual intervals, not PTS
             UpdateStats(render_time_ms, frame_gap_ms);
         }
@@ -443,6 +460,7 @@ void FrameRenderer::RenderLoop() {
 ```
 
 **Timing Philosophy**:
+
 - **Source of Truth**: Decoder PTS (from source media)
 - **Pacing**: Buffer availability (back-pressure from renderer)
 - **Measurement**: Wall-clock intervals (for stats)
@@ -461,12 +479,14 @@ The current renderer implementation provides a solid foundation for advanced fea
 **Goal**: Offload rendering to GPU for improved performance and capability.
 
 **Potential Technologies**:
+
 - **Vulkan**: Modern, cross-platform, explicit control
 - **OpenGL**: Mature, widely supported, easier integration
 - **DirectX 12** (Windows): Native Windows acceleration
 - **Metal** (macOS): Native Apple silicon support
 
 **Benefits**:
+
 ```
 Current: CPU Render (~2-5ms per frame, 1080p)
     ↓
@@ -480,6 +500,7 @@ Enables:
 ```
 
 **Architecture Sketch**:
+
 ```cpp
 class GPURenderer : public FrameRenderer {
  protected:
@@ -488,7 +509,7 @@ class GPURenderer : public FrameRenderer {
         // Create textures for YUV planes
         // Set up render pipeline
     }
-    
+
     void RenderFrame(const Frame& frame) override {
         // Upload frame to GPU texture
         // Execute shader pipeline
@@ -502,6 +523,7 @@ class GPURenderer : public FrameRenderer {
 **Goal**: Real-time graphics overlay and compositing.
 
 **Use Cases**:
+
 - Station logos and bugs
 - Lower-thirds and tickers
 - Transition effects
@@ -509,6 +531,7 @@ class GPURenderer : public FrameRenderer {
 - Real-time color grading
 
 **Example Pipeline**:
+
 ```
 Frame (YUV420)
     ↓
@@ -531,6 +554,7 @@ Output (Display or Encoder)
 **Goal**: Single decode, multiple output destinations.
 
 **Architecture**:
+
 ```
                 ┌─────────────────┐
                 │  FrameProducer  │
@@ -552,6 +576,7 @@ Output (Display or Encoder)
 ```
 
 **Benefits**:
+
 - One decode feeds multiple outputs
 - Reduced CPU/bandwidth usage
 - Synchronized output streams
@@ -562,12 +587,14 @@ Output (Display or Encoder)
 **Goal**: Direct integration with broadcast hardware.
 
 **Potential Targets**:
+
 - **SDI Cards**: Blackmagic DeckLink, AJA Kona
 - **NDI**: Network Device Interface (NewTek)
 - **RTMP/SRT**: Direct network streaming
 - **V4L2**: Linux video output devices
 
 **Example Integration**:
+
 ```cpp
 class SDIRenderer : public FrameRenderer {
  protected:
@@ -584,21 +611,23 @@ class SDIRenderer : public FrameRenderer {
 **Goal**: Precise frame timing for broadcast compliance.
 
 **Requirements**:
+
 - Genlock synchronization
 - Black burst or tri-level sync
 - Sub-frame accurate output
 - Jitter compensation
 
 **Technique**:
+
 ```cpp
 void FrameRenderer::RenderLoop() {
     // Wait for genlock pulse
     WaitForGenlockPulse();
-    
+
     // Pop frame exactly on boundary
     Frame frame;
     buffer.Pop(frame);
-    
+
     // Render with zero jitter
     RenderFrameImmediate(frame);
 }
@@ -608,10 +637,11 @@ void FrameRenderer::RenderLoop() {
 
 ## 📚 Related Documentation
 
-- **[RendererAndHTTPContract.md](RendererAndHTTPContract.md)** - Detailed API contract and specifications
-- **[PlayoutDomainContract.md](PlayoutDomainContract.md)** - Overall playout engine domain model
-- **[PHASE3_PART2_COMPLETE.md](../../PHASE3_PART2_COMPLETE.md)** - Implementation completion summary
-- **[README.md](../../README.md)** - Quick start and usage guide
+- **[Renderer Contract](../contracts/RendererContract.md)** — Detailed API contract and specifications
+- **[Playout Engine Domain](PlayoutEngineDomain.md)** — Overall playout engine domain model
+- **[Metrics and Timing Domain](MetricsAndTimingDomain.md)** — Time synchronization and telemetry
+- **[Phase 3 Complete](../milestones/Phase3_Complete.md)** — Implementation completion summary
+- **[README](../../README.md)** — Quick start and usage guide
 
 ---
 
@@ -620,6 +650,7 @@ void FrameRenderer::RenderLoop() {
 The **Renderer Domain** completes the RetroVue Playout Engine's media pipeline, providing flexible, high-performance frame consumption with multiple output modes:
 
 **Key Capabilities**:
+
 - ✅ Dual renderer modes (headless production + preview debug)
 - ✅ Real-time frame pacing with low latency
 - ✅ Lock-free buffer integration
@@ -628,6 +659,7 @@ The **Renderer Domain** completes the RetroVue Playout Engine's media pipeline, 
 - ✅ Non-critical operation (pipeline continues on renderer failure)
 
 **Design Philosophy**:
+
 - **Simplicity**: Minimal synchronization, clear responsibilities
 - **Performance**: Lock-free, low-latency, efficient
 - **Reliability**: Non-blocking, graceful errors, fail-safe
@@ -639,4 +671,3 @@ The current architecture provides a solid foundation for advanced features inclu
 ---
 
 _Last Updated: 2025-11-08 | Phase 3 Part 2 Complete_
-

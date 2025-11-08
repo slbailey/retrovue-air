@@ -1,6 +1,8 @@
 # Code Structure Refactoring - Development Standards Compliance
 
-_Related: [Development Standards](docs/development-standards.md) • [Phase 2 Complete](PHASE2_COMPLETE.md)_
+_Related: [Development Standards](../../developer/DevelopmentStandards.md) • [Phase 2 Complete](../Phase2_Complete.md)_
+
+> **Note:** This milestone document has been archived. The refactoring was part of Phase 2 development.
 
 ---
 
@@ -345,5 +347,5 @@ The codebase now fully complies with RetroVue's C++ project structure standards:
 
 ---
 
-_For development standards reference, see: [docs/development-standards.md](docs/development-standards.md)_
+_For development standards reference, see: [Development Standards](../../developer/DevelopmentStandards.md)_
 

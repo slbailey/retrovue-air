@@ -1,4 +1,4 @@
-_Related: [Playout Engine Domain](../domain/PlayoutEngineDomain.md) • [Playout Engine Contract](PlayoutEngineDomainContract.md) • [Renderer Contract](RendererContract.md) • [Metrics and Timing Contract](MetricsAndTimingDomainContract.md) • [Architecture Overview](../architecture/ArchitectureOverview.md) • [Phase 2 Plan](../milestones/Phase2_Plan.md)_
+_Related: [Playout Engine Domain](../domain/PlayoutEngineDomain.md) • [Architecture Overview](../architecture/ArchitectureOverview.md) • [Phase 2 Goals](../milestones/Phase2_Goals.md) • [Phase 3 Plan](../milestones/Phase3_Plan.md)_
 
 # Testing Contract — Playout Engine
 
@@ -758,9 +758,7 @@ Before merging any playout engine changes, verify:
 ## See Also
 
 - [Playout Engine Domain](../domain/PlayoutEngineDomain.md) — Entity relationships and behavior contracts
-- [Playout Engine Contract](PlayoutEngineDomainContract.md) — gRPC control plane specification
-- [Renderer Contract](RendererContract.md) — Frame consumption and rendering contracts
-- [Metrics and Timing Contract](MetricsAndTimingDomainContract.md) — Time synchronization and telemetry contracts
+- [Playout Engine Contract](../contracts/PlayoutEngineContract.md) — gRPC control plane specification
 - [Phase 2 Plan](../milestones/Phase2_Plan.md) — Implementation milestones
 - [Development Standards](../developer/DevelopmentStandards.md) — C++ project structure conventions
 - [Architecture Overview](../architecture/ArchitectureOverview.md) — System context and integration

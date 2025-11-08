@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the minimal C++ skeleton implementation for the RetroVue Playout Engine, completing the first milestone of Phase 1 (Bring-up) as outlined in [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md).
+This document describes the minimal C++ skeleton implementation for the RetroVue Playout Engine, completing the first milestone of Phase 1 (Bring-up) as outlined in [PROJECT_OVERVIEW.md](../PROJECT_OVERVIEW.md).
 
 ## What was built
 
@@ -245,12 +245,12 @@ To continue with Phase 1, implement the frame queue:
 4. Add producer thread that generates test frames
 5. Update `playout_service.cpp` to initialize/destroy queues per channel
 
-See [docs/runtime/PlayoutRuntime.md](docs/runtime/PlayoutRuntime.md) for frame queue specifications.
+See [PlayoutRuntime.md](../runtime/PlayoutRuntime.md) for frame queue specifications.
 
 ## References
 
-- [PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md) - Phase 1 roadmap
-- [QuickStart.md](docs/developer/QuickStart.md) - Build and run guide
-- [PlayoutRuntime.md](docs/runtime/PlayoutRuntime.md) - Runtime model
-- [playout.proto](proto/retrovue/playout.proto) - Canonical API contract
+- [PROJECT_OVERVIEW.md](../PROJECT_OVERVIEW.md) - Phase 1 roadmap
+- [QuickStart.md](../developer/QuickStart.md) - Build and run guide
+- [PlayoutRuntime.md](../runtime/PlayoutRuntime.md) - Runtime model
+- [playout.proto](../../proto/retrovue/playout.proto) - Canonical API contract
 

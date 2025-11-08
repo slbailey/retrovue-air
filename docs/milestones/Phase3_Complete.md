@@ -1,6 +1,8 @@
 # ✅ Phase 3 – Real Decode + Renderer + Metrics – COMPLETE
 
-_Related: [Phase 3 Plan](Phase3_Plan.md) • [Phase 2 Complete](Phase2_Complete.md) • [Phase 3 Part 1](Phase3_FFmpeg.md) • [Phase 3 Part 2](Phase3_Part2_Complete.md)_
+_Related: [Phase 3 Plan](Phase3_Plan.md) • [Phase 2 Complete](Phase2_Complete.md)_
+
+> **Detailed Implementation:** For deep-dive technical details, see [Phase 3 FFmpeg Details](archive/Phase3_FFmpeg_Details.md) and [Phase 3 Renderer Details](archive/Phase3_Renderer_Details.md)
 
 ---
 
@@ -556,13 +558,13 @@ Phase 4 will focus on production-readiness, multi-channel deployment, and operat
 ### Phase 3 Documentation
 
 - [Phase 3 Plan](Phase3_Plan.md) – Original goals and deliverables
-- [Phase 3 Part 1: FFmpeg Implementation](Phase3_FFmpeg.md) – Decode layer details
-- [Phase 3 Part 2: Renderer & Metrics](Phase3_Part2_Complete.md) – Render and telemetry details
-- [Phase 3 Completion](Phase3_Completion.md) – This document
+- [Phase 3 Complete](Phase3_Complete.md) – This document (overview)
+- [Phase 3 FFmpeg Details](archive/Phase3_FFmpeg_Details.md) – Deep dive: decoder implementation
+- [Phase 3 Renderer Details](archive/Phase3_Renderer_Details.md) – Deep dive: renderer and metrics
 
 ### Related Documentation
 
-- [Phase 1 Skeleton](Phase1_Skeleton.md) – gRPC foundation
+- [Phase 1 Complete](Phase1_Complete.md) – gRPC foundation
 - [Phase 2 Complete](Phase2_Complete.md) – Buffer and stub decode
 - [Architecture Overview](../architecture/ArchitectureOverview.md) – System design
 - [Playout Engine Domain](../domain/PlayoutEngineDomain.md) – Domain model

@@ -184,22 +184,27 @@ python scripts\test_server.py
 
 ## 📚 Documentation
 
-| Document                                               | Description                |
-| ------------------------------------------------------ | -------------------------- |
-| [Project Overview](docs/PROJECT_OVERVIEW.md)           | High-level architecture    |
-| [Phase 2 Goals](docs/developer/Phase2_Goals.md)        | Frame bus integration      |
-| [Phase 3 Plan](PHASE3_PLAN.md)                         | Renderer + metrics roadmap |
-| [Quick Start](docs/developer/QuickStart.md)            | Getting started guide      |
-| [Build & Debug](docs/developer/BuildAndDebug.md)       | Development workflow       |
-| [Playout Contract](docs/contracts/PlayoutContract.m)   | gRPC API specification     |
-| [Development Standards](docs/development-standards.md) | Code structure guidelines  |
+**[→ Complete Documentation Index](docs/README.md)**
 
-### Phase Milestones
+### Quick Reference
 
-- [Phase 1: Skeleton](PHASE1_SKELETON.md) ✅
-- [Phase 2: Frame Bus](PHASE2_COMPLETE.md) ✅
-- [Phase 3: FFmpeg Decoder](PHASE3_FFMPEG_IMPLEMENTATION.md) ✅
-- [Refactoring Complete](REFACTORING_COMPLETE.md) ✅
+| Document                                                           | Description                    |
+| ------------------------------------------------------------------ | ------------------------------ |
+| [Architecture Overview](docs/architecture/ArchitectureOverview.md) | System architecture and design |
+| [Playout Engine Domain](docs/domain/PlayoutEngineDomain.md)        | Core domain model              |
+| [Playout Engine Contract](docs/contracts/PlayoutEngineContract.md) | gRPC API specification         |
+| [Quick Start](docs/developer/QuickStart.md)                        | Getting started guide          |
+| [Build & Debug](docs/developer/BuildAndDebug.md)                   | Development workflow           |
+| [Development Standards](docs/developer/DevelopmentStandards.md)    | Code structure guidelines      |
+
+### Development Roadmap
+
+**[→ Full Roadmap](docs/milestones/Roadmap.md)**
+
+- ✅ Phase 1: gRPC Skeleton
+- ✅ Phase 2: Frame Buffer & Stub Decode
+- ✅ Phase 3: FFmpeg Decoder + Renderer + HTTP Metrics
+- 📋 Phase 4: Production Hardening (Planned)
 
 ---
 

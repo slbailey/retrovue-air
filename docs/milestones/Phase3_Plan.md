@@ -2,7 +2,7 @@
 
 ## Objective
 
-Transition from synthetic frame generation to actual decoding using libavformat/libavcodec, and connect decoded frames to the renderer subsystem.  
+Transition from synthetic frame generation to actual decoding using libavformat/libavcodec, and connect decoded frames to the renderer subsystem.
 
 ## Goals
 
@@ -15,6 +15,7 @@ Transition from synthetic frame generation to actual decoding using libavformat/
 ## Key Deliverables
 
 1. **Decode Layer** ✅ **COMPLETE**
+
    - ✅ Implement `FFmpegDecoder` in `src/decode/`
    - ✅ Support H.264 MP4 input via `avformat_open_input`
    - ✅ Push frames into `FrameRingBuffer`
@@ -23,11 +24,13 @@ Transition from synthetic frame generation to actual decoding using libavformat/
    - ✅ Performance statistics tracking
 
 2. **Renderer Layer** 🚧 **IN PROGRESS**
+
    - Implement `FrameRenderer` interface
    - Support headless render (for testing) and preview window (debug)
    - Frame timing driven by metadata.pts
 
 3. **Telemetry** 🚧 **IN PROGRESS**
+
    - Add `MetricsHTTPServer` (src/telemetry/)
    - Expose Prometheus-compatible metrics on `localhost:9090/metrics`
    - Include per-channel buffer_depth, fps, frame_delay_ms
@@ -48,4 +51,3 @@ Transition from synthetic frame generation to actual decoding using libavformat/
 - Phase 2 stub code will remain behind a `#define RETROVUE_STUB_DECODE` flag
 - This phase introduces the first full media pipeline (decode → render → metrics)
 - Target completion: End of current sprint
-

@@ -1,6 +1,6 @@
 # Phase 3 – FFmpeg Decoder Implementation
 
-_Related: [Phase 3 Plan](PHASE3_PLAN.md) • [Phase 2 Complete](PHASE2_COMPLETE.md)_
+_Related: [Phase 3 Plan](Phase3_Plan.md) • [Phase 2 Complete](Phase2_Complete.md)_
 
 ---
 
@@ -338,7 +338,7 @@ producer.Start();
 ```
 include/retrovue/decode/FFmpegDecoder.h         (161 lines)
 src/decode/FFmpegDecoder.cpp                    (458 lines)
-PHASE3_FFMPEG_IMPLEMENTATION.md                 (this file)
+Phase3_FFmpeg.md                                (this file)
 ```
 
 ### Modified Files
