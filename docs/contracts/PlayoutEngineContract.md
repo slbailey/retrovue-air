@@ -1,16 +1,175 @@
-_Related: [Playout Engine Domain](../domain/PlayoutEngineDomain.md) • [Playout Engine Contract](PlayoutEngineDomainContract.md) • [Renderer Contract](RendererContract.md) • [Metrics and Timing Contract](MetricsAndTimingDomainContract.md) • [Architecture Overview](../architecture/ArchitectureOverview.md) • [Phase 2 Plan](../milestones/Phase2_Plan.md)_
+_Related: [Playout Engine Domain](../domain/PlayoutEngineDomain.md) • [Proto Schema](../../proto/retrovue/playout.proto) • [Renderer Contract](RendererContract.md) • [Metrics and Timing Contract](MetricsAndTimingDomainContract.md) • [Architecture Overview](../architecture/ArchitectureOverview.md)_
 
-# Testing Contract — Playout Engine
+# Contract — Playout Engine
 
 Status: Enforced
 
-## Purpose & Scope
+## Purpose
 
-This document defines the **canonical test contract** for the RetroVue Playout Engine. It establishes mandatory test coverage, validation criteria, performance expectations, and CI enforcement rules that ensure the playout engine meets its behavioral contracts and operational guarantees.
+This document defines the **complete behavioral contract** for the RetroVue Playout Engine. It establishes:
 
-All tests must validate against the contracts defined in [PlayoutEngineDomain.md](../domain/PlayoutEngineDomain.md). This document bridges domain expectations and concrete test implementations.
+1. **Control Plane API**: gRPC service specification for channel lifecycle management
+2. **Testing Requirements**: Mandatory test coverage and validation criteria
+3. **Performance Targets**: Latency, throughput, and resource utilization expectations
+4. **CI Enforcement**: Continuous integration rules and quality gates
 
-### What This Contract Governs
+This contract ensures the playout engine operates deterministically, maintains clock alignment with MasterClock, and provides observable telemetry for all operational states.
+
+---
+
+## Part 1: Control Plane API
+
+### gRPC Service Overview
+
+The playout engine implements a single gRPC service defined in [`proto/retrovue/playout.proto`](../../proto/retrovue/playout.proto):
+
+```proto
+service PlayoutControl {
+  rpc StartChannel(StartChannelRequest) returns (StartChannelResponse);
+  rpc UpdatePlan(UpdatePlanRequest) returns (UpdatePlanResponse);
+  rpc StopChannel(StopChannelRequest) returns (StopChannelResponse);
+}
+```
+
+> **Note:**  
+> Each method manages a specific channel lifecycle operation and **must be idempotent**.
+
+---
+
+### StartChannel
+
+**Purpose:**  
+Boot a new playout worker for a channel and begin decoding from the provided playout plan.
+
+**Request**
+
+| Field         | Type   | Description                                        |
+| ------------- | ------ | -------------------------------------------------- |
+| `channel_id`  | int32  | Unique numeric identifier for the channel          |
+| `plan_handle` | string | Opaque reference to a serialized playout plan      |
+| `port`        | int32  | Port number where the Renderer will consume output |
+
+**Response**
+
+| Field           | Type   | Description                              |
+| --------------- | ------ | ---------------------------------------- |
+| `success`       | bool   | Indicates whether startup succeeded      |
+| `error_message` | string | (optional) Human-readable failure reason |
+
+**Behavior:**
+
+- Allocate decode threads, initialize ring buffer, and transition channel state to `ready`.
+- On failure, emit `retrovue_playout_channel_state{channel="N"} = "error"` and return `success=false`.
+
+---
+
+### UpdatePlan
+
+**Purpose:**  
+Hot-swap the currently running playout plan without restarting the worker.
+
+**Request**
+
+| Field         | Type   | Description                |
+| ------------- | ------ | -------------------------- |
+| `channel_id`  | int32  | Existing channel worker ID |
+| `plan_handle` | string | New playout plan reference |
+
+**Response**
+
+| Field           | Type   | Description                                 |
+| --------------- | ------ | ------------------------------------------- |
+| `success`       | bool   | True if swap completed successfully         |
+| `error_message` | string | (optional) Diagnostic text if update failed |
+
+**Behavior:**
+
+- Drain the current decode queue.
+- Reload asset map and resume decoding from the next valid timestamp.
+- _Expected downtime: ≤ 500 ms._
+
+---
+
+### StopChannel
+
+**Purpose:**  
+Gracefully shut down an active channel worker.
+
+**Request**
+
+| Field        | Type  | Description                |
+| ------------ | ----- | -------------------------- |
+| `channel_id` | int32 | Channel identifier to stop |
+
+**Response**
+
+| Field           | Type   | Description                                |
+| --------------- | ------ | ------------------------------------------ |
+| `success`       | bool   | True if teardown completed cleanly         |
+| `error_message` | string | (optional) Description if failure occurred |
+
+**Behavior:**
+
+- Flush frame queue, stop decode threads, release all `libav*` resources.
+- Set channel state as `retrovue_playout_channel_state{channel="N"} = "stopped"`.
+
+---
+
+### Telemetry Requirements
+
+The playout engine **must** expose Prometheus metrics at `/metrics`:
+
+| Metric                                    | Type  | Description                                         |
+| ----------------------------------------- | ----- | --------------------------------------------------- |
+| `retrovue_playout_channel_state{channel}` | Gauge | Reports `ready`, `buffering`, `error`, or `stopped` |
+| `retrovue_playout_frame_gap_seconds`      | Gauge | Deviation from scheduled MasterClock timestamps     |
+| `retrovue_playout_buffer_depth_frames`    | Gauge | Number of frames currently staged per channel       |
+
+---
+
+### Versioning Rules
+
+- API versioning is governed by the `PLAYOUT_API_VERSION` constant in the proto file options.
+- Any **backward-incompatible** change (field removal, name/semantic changes, etc.) **must** bump this version and require synchronized releases of:
+  - `retrovue-core`
+  - `retrovue-playout`
+
+---
+
+### Error Handling
+
+- All methods return a `success` flag and an optional `error_message`.
+- **Critical errors** (decoder crash, invalid plan):
+  - Set channel state to `error`.
+  - Attempt restart up to **5 times per minute** with exponential backoff.
+  - If recovery fails, fall back to slate output and notify ChannelManager via health metric.
+
+---
+
+### Example Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant CM as ChannelManager
+    participant PE as Playout Engine
+    participant RD as Renderer
+
+    CM->>PE: StartChannel(channel_id=1, plan_handle="morning_block")
+    PE-->>CM: success=true
+    PE->>RD: Stream decoded frames (YUV420)
+    CM->>PE: UpdatePlan(channel_id=1, plan_handle="noon_block")
+    PE-->>CM: success=true
+    CM->>PE: StopChannel(channel_id=1)
+    PE-->>CM: success=true
+```
+
+---
+
+## Part 2: Testing & Validation
+
+### Scope
+
+This contract enforces testing requirements for the entire playout engine subsystem, validating:
 
 1. **Unit Tests**: Individual component behavior (buffer, decoder, metrics)
 2. **Integration Tests**: Multi-component interactions (decode → buffer → render)
@@ -24,11 +183,11 @@ All tests must validate against the contracts defined in [PlayoutEngineDomain.md
 - **Isolated**: Tests run independently; no shared state between tests
 - **Fast**: Unit tests complete in < 1s; integration tests in < 10s
 - **Observable**: Test failures provide actionable diagnostics
-- **Comprehensive**: All domain contracts (BC-001 through BC-006) have test coverage
+- **Comprehensive**: All domain contracts have test coverage
 
 ---
 
-## 📊 Test Matrix
+### Test Matrix
 
 The following table defines mandatory test coverage for each subsystem:
 
@@ -61,13 +220,11 @@ The following table defines mandatory test coverage for each subsystem:
 
 ---
 
-## 🔄 Lifecycle Tests
+## Lifecycle Tests
 
-Lifecycle tests validate channel state transitions and control plane operations defined in the domain contract.
+Lifecycle tests validate channel state transitions and control plane operations.
 
-### Required Test Scenarios
-
-#### LT-001: Startup Sequence
+### LT-001: Startup Sequence
 
 **Scenario**: `StartChannel` → Channel reaches `ready` state
 
@@ -99,7 +256,7 @@ StartChannelResponse response = service->StartChannel(request);
 
 ---
 
-#### LT-002: Plan Update
+### LT-002: Plan Update
 
 **Scenario**: `UpdatePlan` during active playback
 
@@ -131,7 +288,7 @@ UpdatePlanResponse response = service->UpdatePlan(request);
 
 ---
 
-#### LT-003: Graceful Shutdown
+### LT-003: Graceful Shutdown
 
 **Scenario**: `StopChannel` during active playback
 
@@ -162,7 +319,7 @@ StopChannelResponse response = service->StopChannel(request);
 
 ---
 
-#### LT-004: Error Recovery
+### LT-004: Error Recovery
 
 **Scenario**: Decode error triggers retry sequence
 
@@ -187,7 +344,7 @@ StopChannelResponse response = service->StopChannel(request);
 
 ---
 
-#### LT-005: Buffer Underrun Recovery
+### LT-005: Buffer Underrun Recovery
 
 **Scenario**: Consumer outpaces producer, buffer underruns
 
@@ -207,7 +364,7 @@ StopChannelResponse response = service->StopChannel(request);
 
 ---
 
-#### LT-006: Multi-Channel Isolation
+### LT-006: Multi-Channel Isolation
 
 **Scenario**: One channel failure does not affect others
 
@@ -227,7 +384,7 @@ StopChannelResponse response = service->StopChannel(request);
 
 ---
 
-## 📈 Telemetry Validation
+## Telemetry Validation
 
 All telemetry tests validate metrics against the schema defined in the domain contract.
 
@@ -241,7 +398,7 @@ All telemetry tests validate metrics against the schema defined in the domain co
 - Response code: 200 OK
 - Content-Type: `text/plain; version=0.0.4`
 - Response time ≤ 100ms
-- All required metrics present (see TV-002)
+- All required metrics present
 
 ---
 
@@ -249,7 +406,7 @@ All telemetry tests validate metrics against the schema defined in the domain co
 
 **Test**: All 9 core metrics are exported
 
-**Required Metrics** (from domain contract):
+**Required Metrics**:
 1. `retrovue_playout_channel_state`
 2. `retrovue_playout_buffer_depth_frames`
 3. `retrovue_playout_frame_gap_seconds`
@@ -271,7 +428,7 @@ All telemetry tests validate metrics against the schema defined in the domain co
 
 **Test**: State metric values match encoding
 
-**State Values** (from domain contract):
+**State Values**:
 - `0` = stopped
 - `1` = buffering
 - `2` = ready
@@ -355,7 +512,7 @@ All telemetry tests validate metrics against the schema defined in the domain co
 
 ---
 
-## ⏱️ Performance & Timing
+## Performance & Timing
 
 Performance tests validate latency, throughput, and resource utilization targets.
 
@@ -464,7 +621,7 @@ Performance tests validate latency, throughput, and resource utilization targets
 
 ---
 
-## 🔀 Stub vs Real Mode Rules
+## Stub vs Real Mode Rules
 
 The playout engine supports two operational modes for testing purposes:
 
@@ -516,7 +673,7 @@ The playout engine supports two operational modes for testing purposes:
 **Required Tests**:
 - Decode latency (PT-001)
 - Multi-channel throughput (PT-004)
-- E2E pipeline (test_e2e_pipeline.cpp)
+- E2E pipeline
 - Codec compatibility
 
 ---
@@ -566,13 +723,11 @@ GTEST_SKIP() << "Real decode required";
 
 ---
 
-## 🚨 CI Enforcement
+## CI Enforcement
 
 Continuous Integration must enforce test coverage and prevent regressions.
 
-### CI Requirements
-
-#### CE-001: All Tests Must Pass
+### CE-001: All Tests Must Pass
 
 **Rule**: CI fails if any test fails
 
@@ -583,7 +738,7 @@ Continuous Integration must enforce test coverage and prevent regressions.
 
 ---
 
-#### CE-002: Coverage Thresholds
+### CE-002: Coverage Thresholds
 
 **Rule**: Minimum line coverage enforced
 
@@ -600,11 +755,11 @@ Continuous Integration must enforce test coverage and prevent regressions.
 
 ---
 
-#### CE-003: Required Tests Cannot Be Disabled
+### CE-003: Required Tests Cannot Be Disabled
 
 **Rule**: Core test files must be present and enabled
 
-**Required Test Files** (from Test Matrix):
+**Required Test Files**:
 - `test_buffer.cpp`
 - `test_decode.cpp`
 - `test_metrics.cpp`
@@ -618,7 +773,7 @@ Continuous Integration must enforce test coverage and prevent regressions.
 
 ---
 
-#### CE-004: Performance Regression Detection
+### CE-004: Performance Regression Detection
 
 **Rule**: Performance tests run on every PR
 
@@ -635,7 +790,7 @@ Continuous Integration must enforce test coverage and prevent regressions.
 
 ---
 
-#### CE-005: Memory Leak Detection
+### CE-005: Memory Leak Detection
 
 **Rule**: Valgrind runs on integration tests
 
@@ -646,7 +801,7 @@ Continuous Integration must enforce test coverage and prevent regressions.
 
 ---
 
-#### CE-006: Thread Safety Validation
+### CE-006: Thread Safety Validation
 
 **Rule**: ThreadSanitizer runs on multi-threaded tests
 
@@ -657,7 +812,7 @@ Continuous Integration must enforce test coverage and prevent regressions.
 
 ---
 
-#### CE-007: Stub Mode Must Pass
+### CE-007: Stub Mode Must Pass
 
 **Rule**: All stub-compatible tests pass without FFmpeg
 
@@ -692,7 +847,7 @@ Continuous Integration must enforce test coverage and prevent regressions.
 
 ---
 
-## 📋 Test Checklist
+## Test Checklist
 
 Before merging any playout engine changes, verify:
 
@@ -735,7 +890,7 @@ Before merging any playout engine changes, verify:
 
 ---
 
-## 🔗 Test Data Requirements
+## Test Data Requirements
 
 ### Test Media Assets
 
@@ -757,11 +912,11 @@ Before merging any playout engine changes, verify:
 
 ## See Also
 
-- [Playout Engine Domain](../domain/PlayoutEngineDomain.md) — Entity relationships and behavior contracts
-- [Playout Engine Contract](PlayoutEngineDomainContract.md) — gRPC control plane specification
+- [Playout Engine Domain](../domain/PlayoutEngineDomain.md) — Entity relationships and behavior
+- [Proto Schema](../../proto/retrovue/playout.proto) — gRPC service definition
 - [Renderer Contract](RendererContract.md) — Frame consumption and rendering contracts
-- [Metrics and Timing Contract](MetricsAndTimingDomainContract.md) — Time synchronization and telemetry contracts
-- [Phase 2 Plan](../milestones/Phase2_Plan.md) — Implementation milestones
-- [Development Standards](../developer/DevelopmentStandards.md) — C++ project structure conventions
+- [Metrics and Timing Contract](MetricsAndTimingDomainContract.md) — Time synchronization and telemetry
 - [Architecture Overview](../architecture/ArchitectureOverview.md) — System context and integration
+- [Development Standards](../developer/DevelopmentStandards.md) — C++ project structure conventions
+- [Phase 2 Plan](../milestones/Phase2_Plan.md) — Implementation milestones
 
