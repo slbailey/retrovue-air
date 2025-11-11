@@ -9,310 +9,633 @@
 #include <string>
 #include <utility>
 
-namespace retrovue {
-namespace playout {
+namespace retrovue
+{
+  namespace playout
+  {
 
-namespace {
-constexpr char kApiVersion[] = "1.0.0";
-constexpr size_t kDefaultBufferSize = 60;  // 60 frames (~2 seconds at 30fps)
-constexpr double kPpmDivisor = 1'000'000.0;
-}  // namespace
+    namespace
+    {
+      constexpr char kApiVersion[] = "1.0.0";
+      constexpr size_t kDefaultBufferSize = 60; // 60 frames (~2 seconds at 30fps)
+      constexpr double kPpmDivisor = 1'000'000.0;
 
-PlayoutControlImpl::PlayoutControlImpl(
-    std::shared_ptr<telemetry::MetricsExporter> metrics_exporter,
-    std::shared_ptr<timing::MasterClock> master_clock)
-    : metrics_exporter_(std::move(metrics_exporter)),
-      master_clock_(std::move(master_clock)) {
-  std::cout << "[PlayoutControlImpl] Service initialized (API version: " << kApiVersion
-            << ", drift ppm: "
-            << (master_clock_ ? master_clock_->drift_ppm() : 0.0) << ")" << std::endl;
-}
+      int64_t NowUtc(const std::shared_ptr<timing::MasterClock> &clock)
+      {
+        if (clock)
+        {
+          return clock->now_utc_us();
+        }
 
-PlayoutControlImpl::~PlayoutControlImpl() {
-  std::cout << "[PlayoutControlImpl] Service shutting down" << std::endl;
-  
-  // Stop all active channels
-  std::lock_guard<std::mutex> lock(channels_mutex_);
-  for (auto& [channel_id, worker] : active_channels_) {
-    std::cout << "[PlayoutControlImpl] Stopping channel " << channel_id << std::endl;
-    if (worker->renderer) {
-      worker->renderer->Stop();
+        const auto now = std::chrono::system_clock::now();
+        return std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+      }
+
+      std::string MakeCommandId(const char *prefix, int32_t channel_id)
+      {
+        return std::string(prefix) + "-" + std::to_string(channel_id);
+      }
+
+      telemetry::ChannelState ToChannelState(runtime::PlayoutControlStateMachine::State state)
+      {
+        using State = runtime::PlayoutControlStateMachine::State;
+        switch (state)
+        {
+        case State::kIdle:
+          return telemetry::ChannelState::STOPPED;
+        case State::kBuffering:
+          return telemetry::ChannelState::BUFFERING;
+        case State::kReady:
+        case State::kPlaying:
+        case State::kPaused:
+          return telemetry::ChannelState::READY;
+        case State::kStopping:
+          return telemetry::ChannelState::BUFFERING;
+        case State::kError:
+          return telemetry::ChannelState::ERROR_STATE;
+        }
+        return telemetry::ChannelState::STOPPED;
+      }
+    } // namespace
+
+    PlayoutControlImpl::PlayoutControlImpl(
+        std::shared_ptr<telemetry::MetricsExporter> metrics_exporter,
+        std::shared_ptr<timing::MasterClock> master_clock)
+        : metrics_exporter_(std::move(metrics_exporter)),
+          master_clock_(std::move(master_clock))
+    {
+      std::cout << "[PlayoutControlImpl] Service initialized (API version: " << kApiVersion
+                << ", drift ppm: "
+                << (master_clock_ ? master_clock_->drift_ppm() : 0.0) << ")" << std::endl;
     }
-    if (worker->producer) {
-      worker->producer->Stop();
+
+    PlayoutControlImpl::~PlayoutControlImpl()
+    {
+      std::cout << "[PlayoutControlImpl] Service shutting down" << std::endl;
+
+      // Stop all active channels
+      std::lock_guard<std::mutex> lock(channels_mutex_);
+      for (auto &[channel_id, worker] : active_channels_)
+      {
+        std::cout << "[PlayoutControlImpl] Stopping channel " << channel_id << std::endl;
+        if (worker->renderer)
+        {
+          worker->renderer->Stop();
+        }
+        if (worker->control)
+        {
+          const int64_t now = NowUtc(master_clock_);
+          worker->control->Stop(MakeCommandId("stop", channel_id), now, now);
+        }
+        if (worker->orchestration_loop)
+        {
+          worker->orchestration_loop->Stop();
+        }
+        if (worker->producer)
+        {
+          worker->producer->Stop();
+        }
+        if (metrics_exporter_)
+        {
+          metrics_exporter_->SubmitChannelRemoval(channel_id);
+        }
+      }
+      active_channels_.clear();
     }
-    if (metrics_exporter_) {
-      metrics_exporter_->RemoveChannel(channel_id);
+
+    grpc::Status PlayoutControlImpl::StartChannel(grpc::ServerContext *context,
+                                                  const StartChannelRequest *request,
+                                                  StartChannelResponse *response)
+    {
+      std::lock_guard<std::mutex> lock(channels_mutex_);
+
+      const int32_t channel_id = request->channel_id();
+      const int64_t request_time = NowUtc(master_clock_);
+      const std::string &plan_handle = request->plan_handle();
+      const int32_t port = request->port();
+
+      std::cout << "[StartChannel] Request received: channel_id=" << channel_id
+                << ", plan_handle=" << plan_handle << ", port=" << port << std::endl;
+
+      // Check if channel is already active
+      if (active_channels_.find(channel_id) != active_channels_.end())
+      {
+        response->set_success(false);
+        response->set_message("Channel already active");
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS,
+                            "Channel is already running");
+      }
+
+      // Create channel worker
+      auto worker = std::make_unique<ChannelWorker>(channel_id, plan_handle, port);
+
+      // Initialize ring buffer
+      worker->ring_buffer = std::make_unique<buffer::FrameRingBuffer>(kDefaultBufferSize);
+
+      // Configure frame producer
+      decode::ProducerConfig producer_config;
+      producer_config.asset_uri = plan_handle; // Use plan_handle as asset URI for now
+      producer_config.target_width = 1920;
+      producer_config.target_height = 1080;
+      producer_config.target_fps = 30.0;
+      producer_config.stub_mode = false; // Phase 3: real decode (falls back to stub if FFmpeg unavailable)
+
+      // Create producer
+      worker->producer = std::make_unique<decode::FrameProducer>(
+          producer_config, *worker->ring_buffer, master_clock_);
+
+      // Start decode thread
+      if (!worker->producer->Start())
+      {
+        response->set_success(false);
+        response->set_message("Failed to start frame producer");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "Producer start failed");
+      }
+
+      // Configure and create renderer (Phase 3)
+      renderer::RenderConfig render_config;
+      render_config.mode = renderer::RenderMode::HEADLESS; // Default to headless mode
+      render_config.window_width = 1920;
+      render_config.window_height = 1080;
+      render_config.window_title = "RetroVue Channel " + std::to_string(channel_id);
+
+      worker->renderer = renderer::FrameRenderer::Create(
+          render_config, *worker->ring_buffer, master_clock_, metrics_exporter_, channel_id);
+
+      // Initialize playout control state machine
+      worker->control = std::make_unique<runtime::PlayoutControlStateMachine>();
+      worker->control->BeginSession(MakeCommandId("begin", channel_id), request_time);
+
+      // Start render thread
+      if (!worker->renderer->Start())
+      {
+        std::cerr << "[StartChannel] WARNING: Failed to start renderer, continuing without it"
+                  << std::endl;
+        // Don't fail the entire StartChannel operation if renderer fails
+        // Producer will fill buffer, it just won't be consumed
+      }
+
+      // Initialize orchestration loop to monitor cadence and back-pressure.
+      worker->underrun_active = std::make_shared<std::atomic<bool>>(false);
+      worker->overrun_active = std::make_shared<std::atomic<bool>>(false);
+
+      runtime::OrchestrationLoop::Config loop_config;
+      loop_config.target_fps = producer_config.target_fps;
+      loop_config.max_tick_skew_ms = 1.5; // Allow slight tolerance in production
+
+      auto loop = std::make_unique<runtime::OrchestrationLoop>(
+          loop_config, master_clock_,
+          nullptr);
+
+      auto *loop_ptr = loop.get();
+      auto *ring_buffer_ptr = worker->ring_buffer.get();
+      auto *control_ptr = worker->control.get();
+      auto underrun_flag = worker->underrun_active;
+      auto overrun_flag = worker->overrun_active;
+      auto metrics = metrics_exporter_;
+      auto clock = master_clock_;
+
+      loop->SetTickCallback(
+          [loop_ptr, ring_buffer_ptr, control_ptr, underrun_flag, overrun_flag, metrics, channel_id, clock](
+              const runtime::OrchestrationLoop::TickContext &context)
+          {
+            runtime::OrchestrationLoop::TickResult result;
+
+            if (ring_buffer_ptr != nullptr)
+            {
+              const size_t depth = ring_buffer_ptr->Size();
+              const size_t capacity = ring_buffer_ptr->Capacity();
+              const int64_t now_utc = NowUtc(clock);
+
+              if (control_ptr != nullptr)
+              {
+                control_ptr->OnBufferDepth(depth, capacity, now_utc);
+              }
+
+              if (depth == 0)
+              {
+                if (!underrun_flag->exchange(true))
+                {
+                  loop_ptr->ReportBackPressureEvent(
+                      runtime::OrchestrationLoop::BackPressureEvent::kUnderrun);
+                  if (control_ptr != nullptr)
+                  {
+                    control_ptr->OnBackPressureEvent(
+                        runtime::OrchestrationLoop::BackPressureEvent::kUnderrun,
+                        now_utc);
+                  }
+                }
+              }
+              else if (underrun_flag->exchange(false))
+              {
+                result.backpressure_cleared = true;
+                if (control_ptr != nullptr)
+                {
+                  control_ptr->OnBackPressureCleared(now_utc);
+                }
+              }
+
+              if (capacity > 0 && depth + 1 >= capacity)
+              {
+                if (!overrun_flag->exchange(true))
+                {
+                  loop_ptr->ReportBackPressureEvent(
+                      runtime::OrchestrationLoop::BackPressureEvent::kOverrun);
+                  if (control_ptr != nullptr)
+                  {
+                    control_ptr->OnBackPressureEvent(
+                        runtime::OrchestrationLoop::BackPressureEvent::kOverrun,
+                        now_utc);
+                  }
+                }
+              }
+              else if (overrun_flag->exchange(false))
+              {
+                result.backpressure_cleared = true;
+                if (control_ptr != nullptr)
+                {
+                  control_ptr->OnBackPressureCleared(now_utc);
+                }
+              }
+
+              // Approximate producer→renderer latency using buffer occupancy.
+              if (capacity > 0)
+              {
+                const double ratio = static_cast<double>(depth) / static_cast<double>(capacity);
+                result.producer_to_renderer_latency_ms = ratio * 20.0; // heuristic estimate
+              }
+            }
+
+            if (metrics)
+            {
+              telemetry::ChannelMetrics snapshot{};
+              snapshot.state = control_ptr ? ToChannelState(control_ptr->state())
+                                           : telemetry::ChannelState::READY;
+              snapshot.buffer_depth_frames = ring_buffer_ptr ? ring_buffer_ptr->Size() : 0;
+              metrics->SubmitChannelMetrics(channel_id, snapshot);
+            }
+
+            return result;
+          });
+
+      loop->Start();
+      worker->orchestration_loop = std::move(loop);
+
+      // Update metrics
+      if (metrics_exporter_)
+      {
+        telemetry::ChannelMetrics metrics;
+        metrics.state = ToChannelState(worker->control ? worker->control->state()
+                                                       : runtime::PlayoutControlStateMachine::State::kBuffering);
+        metrics.buffer_depth_frames = 0;
+        metrics.frame_gap_seconds = 0.0;
+        metrics.decode_failure_count = 0;
+        metrics.corrections_total = 0;
+        metrics_exporter_->SubmitChannelMetrics(channel_id, metrics);
+      }
+
+      // Store worker
+      active_channels_[channel_id] = std::move(worker);
+
+      response->set_success(true);
+      response->set_message("Channel started with frame production");
+
+      std::cout << "[StartChannel] Channel " << channel_id << " started successfully" << std::endl;
+      return grpc::Status::OK;
     }
-  }
-  active_channels_.clear();
-}
 
-grpc::Status PlayoutControlImpl::StartChannel(grpc::ServerContext* context,
-                                               const StartChannelRequest* request,
-                                               StartChannelResponse* response) {
-  std::lock_guard<std::mutex> lock(channels_mutex_);
+    grpc::Status PlayoutControlImpl::UpdatePlan(grpc::ServerContext *context,
+                                                const UpdatePlanRequest *request,
+                                                UpdatePlanResponse *response)
+    {
+      std::lock_guard<std::mutex> lock(channels_mutex_);
 
-  const int32_t channel_id = request->channel_id();
-  const std::string& plan_handle = request->plan_handle();
-  const int32_t port = request->port();
+      const int32_t channel_id = request->channel_id();
+      const std::string &plan_handle = request->plan_handle();
+      const int64_t request_time = NowUtc(master_clock_);
 
-  std::cout << "[StartChannel] Request received: channel_id=" << channel_id
-            << ", plan_handle=" << plan_handle << ", port=" << port << std::endl;
+      std::cout << "[UpdatePlan] Request received: channel_id=" << channel_id
+                << ", plan_handle=" << plan_handle << std::endl;
 
-  // Check if channel is already active
-  if (active_channels_.find(channel_id) != active_channels_.end()) {
-    response->set_success(false);
-    response->set_message("Channel already active");
-    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS,
-                        "Channel is already running");
-  }
+      // Check if channel is active
+      auto it = active_channels_.find(channel_id);
+      if (it == active_channels_.end())
+      {
+        response->set_success(false);
+        response->set_message("Channel not found");
+        return grpc::Status(grpc::StatusCode::NOT_FOUND, "Channel is not running");
+      }
 
-  // Create channel worker
-  auto worker = std::make_unique<ChannelWorker>(channel_id, plan_handle, port);
+      auto &worker = it->second;
 
-  // Initialize ring buffer
-  worker->ring_buffer = std::make_unique<buffer::FrameRingBuffer>(kDefaultBufferSize);
+      // Phase 3: Hot-swap by stopping and restarting producer and renderer
+      // Future optimization: seamless transition without stopping
+      std::cout << "[UpdatePlan] Stopping current producer and renderer..." << std::endl;
 
-  // Configure frame producer
-  decode::ProducerConfig producer_config;
-  producer_config.asset_uri = plan_handle;  // Use plan_handle as asset URI for now
-  producer_config.target_width = 1920;
-  producer_config.target_height = 1080;
-  producer_config.target_fps = 30.0;
-  producer_config.stub_mode = false;  // Phase 3: real decode (falls back to stub if FFmpeg unavailable)
+      if (worker->renderer)
+      {
+        worker->renderer->Stop();
+      }
+      if (worker->orchestration_loop)
+      {
+        worker->orchestration_loop->Stop();
+        worker->orchestration_loop.reset();
+      }
 
-  // Create producer
-  worker->producer = std::make_unique<decode::FrameProducer>(
-      producer_config, *worker->ring_buffer, master_clock_);
+      if (worker->producer)
+      {
+        worker->producer->Stop();
+      }
 
-  // Start decode thread
-  if (!worker->producer->Start()) {
-    response->set_success(false);
-    response->set_message("Failed to start frame producer");
-    return grpc::Status(grpc::StatusCode::INTERNAL, "Producer start failed");
-  }
+      // Clear ring buffer
+      if (worker->ring_buffer)
+      {
+        worker->ring_buffer->Clear();
+      }
 
-  // Configure and create renderer (Phase 3)
-  renderer::RenderConfig render_config;
-  render_config.mode = renderer::RenderMode::HEADLESS;  // Default to headless mode
-  render_config.window_width = 1920;
-  render_config.window_height = 1080;
-  render_config.window_title = "RetroVue Channel " + std::to_string(channel_id);
+      // Update plan handle
+      worker->plan_handle = plan_handle;
 
-  worker->renderer = renderer::FrameRenderer::Create(
-      render_config, *worker->ring_buffer, master_clock_, metrics_exporter_, channel_id);
+      // Reconfigure and restart producer
+      decode::ProducerConfig producer_config;
+      producer_config.asset_uri = plan_handle;
+      producer_config.target_width = 1920;
+      producer_config.target_height = 1080;
+      producer_config.target_fps = 30.0;
+      producer_config.stub_mode = false; // Phase 3: real decode
 
-  // Start render thread
-  if (!worker->renderer->Start()) {
-    std::cerr << "[StartChannel] WARNING: Failed to start renderer, continuing without it" 
-              << std::endl;
-    // Don't fail the entire StartChannel operation if renderer fails
-    // Producer will fill buffer, it just won't be consumed
-  }
+      worker->producer = std::make_unique<decode::FrameProducer>(
+          producer_config, *worker->ring_buffer, master_clock_);
 
-  // Update metrics
-  if (metrics_exporter_) {
-    telemetry::ChannelMetrics metrics;
-    metrics.state = telemetry::ChannelState::READY;
-    metrics.buffer_depth_frames = 0;
-    metrics.frame_gap_seconds = 0.0;
-    metrics.decode_failure_count = 0;
-    metrics.corrections_total = 0;
-    metrics_exporter_->UpdateChannelMetrics(channel_id, metrics);
-  }
+      if (!worker->producer->Start())
+      {
+        response->set_success(false);
+        response->set_message("Failed to restart frame producer");
 
-  // Store worker
-  active_channels_[channel_id] = std::move(worker);
+        // Update metrics to error state
+        if (metrics_exporter_)
+        {
+          telemetry::ChannelMetrics metrics;
+          metrics.state = telemetry::ChannelState::ERROR_STATE;
+          metrics.corrections_total = 0;
+          metrics_exporter_->SubmitChannelMetrics(channel_id, metrics);
+        }
 
-  response->set_success(true);
-  response->set_message("Channel started with frame production");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "Producer restart failed");
+      }
 
-  std::cout << "[StartChannel] Channel " << channel_id << " started successfully" << std::endl;
-  return grpc::Status::OK;
-}
+      // Restart renderer
+      if (worker->renderer)
+      {
+        if (!worker->renderer->Start())
+        {
+          std::cerr << "[UpdatePlan] WARNING: Failed to restart renderer" << std::endl;
+        }
 
-grpc::Status PlayoutControlImpl::UpdatePlan(grpc::ServerContext* context,
-                                             const UpdatePlanRequest* request,
-                                             UpdatePlanResponse* response) {
-  std::lock_guard<std::mutex> lock(channels_mutex_);
+        worker->underrun_active = std::make_shared<std::atomic<bool>>(false);
+        worker->overrun_active = std::make_shared<std::atomic<bool>>(false);
 
-  const int32_t channel_id = request->channel_id();
-  const std::string& plan_handle = request->plan_handle();
+        runtime::OrchestrationLoop::Config loop_config;
+        loop_config.target_fps = producer_config.target_fps;
 
-  std::cout << "[UpdatePlan] Request received: channel_id=" << channel_id
-            << ", plan_handle=" << plan_handle << std::endl;
+        auto loop = std::make_unique<runtime::OrchestrationLoop>(
+            loop_config, master_clock_,
+            nullptr);
 
-  // Check if channel is active
-  auto it = active_channels_.find(channel_id);
-  if (it == active_channels_.end()) {
-    response->set_success(false);
-    response->set_message("Channel not found");
-    return grpc::Status(grpc::StatusCode::NOT_FOUND, "Channel is not running");
-  }
+        auto *loop_ptr = loop.get();
+        auto *ring_buffer_ptr = worker->ring_buffer.get();
+        auto *control_ptr = worker->control.get();
+        auto underrun_flag = worker->underrun_active;
+        auto overrun_flag = worker->overrun_active;
+        auto metrics = metrics_exporter_;
+        auto clock = master_clock_;
 
-  auto& worker = it->second;
+        loop->SetTickCallback(
+            [loop_ptr, ring_buffer_ptr, control_ptr, underrun_flag, overrun_flag, metrics, channel_id, clock](
+                const runtime::OrchestrationLoop::TickContext &)
+            {
+              runtime::OrchestrationLoop::TickResult result;
 
-  // Phase 3: Hot-swap by stopping and restarting producer and renderer
-  // Future optimization: seamless transition without stopping
-  std::cout << "[UpdatePlan] Stopping current producer and renderer..." << std::endl;
-  
-  if (worker->renderer) {
-    worker->renderer->Stop();
-  }
-  
-  if (worker->producer) {
-    worker->producer->Stop();
-  }
+              if (ring_buffer_ptr != nullptr)
+              {
+                const size_t depth = ring_buffer_ptr->Size();
+                const size_t capacity = ring_buffer_ptr->Capacity();
+                const int64_t now_utc = NowUtc(clock);
 
-  // Clear ring buffer
-  if (worker->ring_buffer) {
-    worker->ring_buffer->Clear();
-  }
+                if (control_ptr != nullptr)
+                {
+                  control_ptr->OnBufferDepth(depth, capacity, now_utc);
+                }
 
-  // Update plan handle
-  worker->plan_handle = plan_handle;
+                if (depth == 0)
+                {
+                  if (!underrun_flag->exchange(true))
+                  {
+                    loop_ptr->ReportBackPressureEvent(
+                        runtime::OrchestrationLoop::BackPressureEvent::kUnderrun);
+                    if (control_ptr != nullptr)
+                    {
+                      control_ptr->OnBackPressureEvent(
+                          runtime::OrchestrationLoop::BackPressureEvent::kUnderrun,
+                          now_utc);
+                    }
+                  }
+                }
+                else if (underrun_flag->exchange(false))
+                {
+                  result.backpressure_cleared = true;
+                  if (control_ptr != nullptr)
+                  {
+                    control_ptr->OnBackPressureCleared(now_utc);
+                  }
+                }
 
-  // Reconfigure and restart producer
-  decode::ProducerConfig producer_config;
-  producer_config.asset_uri = plan_handle;
-  producer_config.target_width = 1920;
-  producer_config.target_height = 1080;
-  producer_config.target_fps = 30.0;
-  producer_config.stub_mode = false;  // Phase 3: real decode
+                if (capacity > 0 && depth + 1 >= capacity)
+                {
+                  if (!overrun_flag->exchange(true))
+                  {
+                    loop_ptr->ReportBackPressureEvent(
+                        runtime::OrchestrationLoop::BackPressureEvent::kOverrun);
+                    if (control_ptr != nullptr)
+                    {
+                      control_ptr->OnBackPressureEvent(
+                          runtime::OrchestrationLoop::BackPressureEvent::kOverrun,
+                          now_utc);
+                    }
+                  }
+                }
+                else if (overrun_flag->exchange(false))
+                {
+                  result.backpressure_cleared = true;
+                  if (control_ptr != nullptr)
+                  {
+                    control_ptr->OnBackPressureCleared(now_utc);
+                  }
+                }
 
-  worker->producer = std::make_unique<decode::FrameProducer>(
-      producer_config, *worker->ring_buffer, master_clock_);
+                if (capacity > 0)
+                {
+                  const double ratio = static_cast<double>(depth) / static_cast<double>(capacity);
+                  result.producer_to_renderer_latency_ms = ratio * 20.0;
+                }
+              }
 
-  if (!worker->producer->Start()) {
-    response->set_success(false);
-    response->set_message("Failed to restart frame producer");
-    
-    // Update metrics to error state
-    if (metrics_exporter_) {
+              if (metrics)
+              {
+                telemetry::ChannelMetrics snapshot{};
+                snapshot.state = control_ptr ? ToChannelState(control_ptr->state())
+                                             : telemetry::ChannelState::READY;
+                snapshot.buffer_depth_frames = ring_buffer_ptr ? ring_buffer_ptr->Size() : 0;
+                metrics->SubmitChannelMetrics(channel_id, snapshot);
+              }
+
+              return result;
+            });
+
+        loop->Start();
+        worker->orchestration_loop = std::move(loop);
+      }
+
+      if (worker->control)
+      {
+        const int64_t effective_time = NowUtc(master_clock_);
+        worker->control->Seek(MakeCommandId("seek", channel_id),
+                              request_time,
+                              effective_time,
+                              effective_time);
+      }
+
+      // Update metrics
+      UpdateChannelMetrics(channel_id);
+
+      response->set_success(true);
+      response->set_message("Plan updated with producer restart");
+
+      std::cout << "[UpdatePlan] Channel " << channel_id << " plan updated successfully" << std::endl;
+      return grpc::Status::OK;
+    }
+
+    grpc::Status PlayoutControlImpl::StopChannel(grpc::ServerContext *context,
+                                                 const StopChannelRequest *request,
+                                                 StopChannelResponse *response)
+    {
+      std::lock_guard<std::mutex> lock(channels_mutex_);
+
+      const int32_t channel_id = request->channel_id();
+      const int64_t request_time = NowUtc(master_clock_);
+
+      std::cout << "[StopChannel] Request received: channel_id=" << channel_id << std::endl;
+
+      // Check if channel is active
+      auto it = active_channels_.find(channel_id);
+      if (it == active_channels_.end())
+      {
+        response->set_success(false);
+        response->set_message("Channel not found");
+        return grpc::Status(grpc::StatusCode::NOT_FOUND, "Channel is not running");
+      }
+
+      auto &worker = it->second;
+
+      // Stop renderer first (consumer)
+      if (worker->renderer)
+      {
+        std::cout << "[StopChannel] Stopping renderer for channel " << channel_id << std::endl;
+        worker->renderer->Stop();
+      }
+
+      if (worker->orchestration_loop)
+      {
+        worker->orchestration_loop->Stop();
+        worker->orchestration_loop.reset();
+      }
+
+      // Stop frame producer (producer)
+      if (worker->producer)
+      {
+        std::cout << "[StopChannel] Stopping producer for channel " << channel_id << std::endl;
+        worker->producer->Stop();
+      }
+
+      if (worker->control)
+      {
+        const int64_t effective_time = NowUtc(master_clock_);
+        worker->control->Stop(MakeCommandId("stop", channel_id), request_time, effective_time);
+      }
+
+      // Update metrics to stopped state
+      if (metrics_exporter_)
+      {
+        telemetry::ChannelMetrics metrics;
+        metrics.state = telemetry::ChannelState::STOPPED;
+        metrics.buffer_depth_frames = 0;
+        metrics.frame_gap_seconds = 0.0;
+        metrics.decode_failure_count = 0;
+        metrics.corrections_total = 0;
+        metrics_exporter_->SubmitChannelMetrics(channel_id, metrics);
+
+        // Remove from metrics after a brief delay (handled externally)
+        metrics_exporter_->SubmitChannelRemoval(channel_id);
+      }
+
+      // Remove worker (RAII cleanup handles buffer/producer destruction)
+      active_channels_.erase(it);
+
+      response->set_success(true);
+      response->set_message("Channel stopped and resources released");
+
+      std::cout << "[StopChannel] Channel " << channel_id << " stopped successfully" << std::endl;
+      return grpc::Status::OK;
+    }
+
+    grpc::Status PlayoutControlImpl::GetVersion(grpc::ServerContext *context,
+                                                const ApiVersionRequest *request,
+                                                ApiVersion *response)
+    {
+      std::cout << "[GetVersion] Request received" << std::endl;
+
+      response->set_version(kApiVersion);
+
+      std::cout << "[GetVersion] Returning version: " << kApiVersion << std::endl;
+      return grpc::Status::OK;
+    }
+
+    void PlayoutControlImpl::UpdateChannelMetrics(int32_t channel_id)
+    {
+      if (!metrics_exporter_)
+      {
+        return;
+      }
+
+      auto it = active_channels_.find(channel_id);
+      if (it == active_channels_.end())
+      {
+        return;
+      }
+
+      auto &worker = it->second;
+
       telemetry::ChannelMetrics metrics;
-      metrics.state = telemetry::ChannelState::ERROR_STATE;
-    metrics.corrections_total = 0;
-      metrics_exporter_->UpdateChannelMetrics(channel_id, metrics);
+      metrics.state = worker->control ? ToChannelState(worker->control->state())
+                                      : telemetry::ChannelState::READY;
+
+      if (worker->ring_buffer)
+      {
+        metrics.buffer_depth_frames = worker->ring_buffer->Size();
+      }
+
+      if (worker->producer)
+      {
+        // Update decode failure count (stub for now)
+        metrics.decode_failure_count = worker->producer->GetBufferFullCount();
+      }
+
+      // Frame gap calculation would go here (requires MasterClock integration)
+      metrics.frame_gap_seconds =
+          master_clock_ ? master_clock_->drift_ppm() / kPpmDivisor : 0.0;
+
+      metrics_exporter_->SubmitChannelMetrics(channel_id, metrics);
     }
-    
-    return grpc::Status(grpc::StatusCode::INTERNAL, "Producer restart failed");
-  }
 
-  // Restart renderer
-  if (worker->renderer) {
-    if (!worker->renderer->Start()) {
-      std::cerr << "[UpdatePlan] WARNING: Failed to restart renderer" << std::endl;
-    }
-  }
-
-  // Update metrics
-  UpdateChannelMetrics(channel_id);
-
-  response->set_success(true);
-  response->set_message("Plan updated with producer restart");
-
-  std::cout << "[UpdatePlan] Channel " << channel_id << " plan updated successfully" << std::endl;
-  return grpc::Status::OK;
-}
-
-grpc::Status PlayoutControlImpl::StopChannel(grpc::ServerContext* context,
-                                              const StopChannelRequest* request,
-                                              StopChannelResponse* response) {
-  std::lock_guard<std::mutex> lock(channels_mutex_);
-
-  const int32_t channel_id = request->channel_id();
-
-  std::cout << "[StopChannel] Request received: channel_id=" << channel_id << std::endl;
-
-  // Check if channel is active
-  auto it = active_channels_.find(channel_id);
-  if (it == active_channels_.end()) {
-    response->set_success(false);
-    response->set_message("Channel not found");
-    return grpc::Status(grpc::StatusCode::NOT_FOUND, "Channel is not running");
-  }
-
-  auto& worker = it->second;
-
-  // Stop renderer first (consumer)
-  if (worker->renderer) {
-    std::cout << "[StopChannel] Stopping renderer for channel " << channel_id << std::endl;
-    worker->renderer->Stop();
-  }
-
-  // Stop frame producer (producer)
-  if (worker->producer) {
-    std::cout << "[StopChannel] Stopping producer for channel " << channel_id << std::endl;
-    worker->producer->Stop();
-  }
-
-  // Update metrics to stopped state
-  if (metrics_exporter_) {
-    telemetry::ChannelMetrics metrics;
-    metrics.state = telemetry::ChannelState::STOPPED;
-    metrics.buffer_depth_frames = 0;
-    metrics.frame_gap_seconds = 0.0;
-    metrics.decode_failure_count = 0;
-    metrics.corrections_total = 0;
-    metrics_exporter_->UpdateChannelMetrics(channel_id, metrics);
-    
-    // Remove from metrics after a brief delay (handled externally)
-    metrics_exporter_->RemoveChannel(channel_id);
-  }
-
-  // Remove worker (RAII cleanup handles buffer/producer destruction)
-  active_channels_.erase(it);
-
-  response->set_success(true);
-  response->set_message("Channel stopped and resources released");
-
-  std::cout << "[StopChannel] Channel " << channel_id << " stopped successfully" << std::endl;
-  return grpc::Status::OK;
-}
-
-grpc::Status PlayoutControlImpl::GetVersion(grpc::ServerContext* context,
-                                             const ApiVersionRequest* request,
-                                             ApiVersion* response) {
-  std::cout << "[GetVersion] Request received" << std::endl;
-
-  response->set_version(kApiVersion);
-
-  std::cout << "[GetVersion] Returning version: " << kApiVersion << std::endl;
-  return grpc::Status::OK;
-}
-
-void PlayoutControlImpl::UpdateChannelMetrics(int32_t channel_id) {
-  if (!metrics_exporter_) {
-    return;
-  }
-
-  auto it = active_channels_.find(channel_id);
-  if (it == active_channels_.end()) {
-    return;
-  }
-
-  auto& worker = it->second;
-  
-  telemetry::ChannelMetrics metrics;
-  metrics.state = telemetry::ChannelState::READY;
-  
-  if (worker->ring_buffer) {
-    metrics.buffer_depth_frames = worker->ring_buffer->Size();
-  }
-  
-  if (worker->producer) {
-    // Update decode failure count (stub for now)
-    metrics.decode_failure_count = worker->producer->GetBufferFullCount();
-  }
-  
-  // Frame gap calculation would go here (requires MasterClock integration)
-  metrics.frame_gap_seconds =
-      master_clock_ ? master_clock_->drift_ppm() / kPpmDivisor : 0.0;
-  
-  metrics_exporter_->UpdateChannelMetrics(channel_id, metrics);
-}
-
-}  // namespace playout
-}  // namespace retrovue
-
+  } // namespace playout
+} // namespace retrovue

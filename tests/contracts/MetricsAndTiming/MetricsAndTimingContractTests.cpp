@@ -164,7 +164,7 @@ namespace
 
     telemetry::ChannelMetrics seed{};
     seed.state = telemetry::ChannelState::READY;
-    metrics->UpdateChannelMetrics(kChannelId, seed);
+    metrics->SubmitChannelMetrics(kChannelId, seed);
 
     auto renderer = renderer::FrameRenderer::Create(
         config, buffer, clock, metrics, kChannelId);
@@ -215,7 +215,7 @@ namespace
     telemetry::ChannelMetrics buffering{};
     buffering.state = telemetry::ChannelState::BUFFERING;
     buffering.buffer_depth_frames = 0;
-    exporter.UpdateChannelMetrics(runtime.channel_id, buffering);
+    exporter.SubmitChannelMetrics(runtime.channel_id, buffering);
 
     telemetry::ChannelMetrics metrics{};
     ASSERT_TRUE(exporter.GetChannelMetrics(runtime.channel_id, metrics));
@@ -234,7 +234,7 @@ namespace
     telemetry::ChannelMetrics ready{};
     ready.state = telemetry::ChannelState::READY;
     ready.buffer_depth_frames = buffer.Size();
-    exporter.UpdateChannelMetrics(runtime.channel_id, ready);
+    exporter.SubmitChannelMetrics(runtime.channel_id, ready);
 
     ASSERT_TRUE(exporter.GetChannelMetrics(runtime.channel_id, metrics));
     EXPECT_EQ(metrics.state, telemetry::ChannelState::READY);
@@ -520,7 +520,7 @@ namespace
     anomaly.frame_gap_seconds = 0.012;
     anomaly.decode_failure_count = 3;
     anomaly.corrections_total = 5;
-    exporter->UpdateChannelMetrics(kChannelId, anomaly);
+    exporter->SubmitChannelMetrics(kChannelId, anomaly);
 
     telemetry::ChannelMetrics snapshot{};
     ASSERT_TRUE(exporter->GetChannelMetrics(kChannelId, snapshot));
@@ -549,7 +549,7 @@ namespace
 
     auto metrics = std::make_shared<telemetry::MetricsExporter>(0);
     telemetry::ChannelMetrics seed{};
-    metrics->UpdateChannelMetrics(808, seed);
+    metrics->SubmitChannelMetrics(808, seed);
 
     renderer::RenderConfig config;
     config.mode = renderer::RenderMode::HEADLESS;

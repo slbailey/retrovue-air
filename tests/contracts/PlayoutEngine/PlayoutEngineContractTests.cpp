@@ -70,7 +70,7 @@ TEST_F(PlayoutEngineContractTest, BC_001_FrameTimingAlignsWithMasterClock)
   constexpr int32_t kChannelId = 2401;
   telemetry::ChannelMetrics seed{};
   seed.state = telemetry::ChannelState::READY;
-  metrics->UpdateChannelMetrics(kChannelId, seed);
+  metrics->SubmitChannelMetrics(kChannelId, seed);
 
   renderer::RenderConfig config;
   config.mode = renderer::RenderMode::HEADLESS;
@@ -169,7 +169,7 @@ TEST_F(PlayoutEngineContractTest, BC_004_ChannelErrorIsolation)
   telemetry::ChannelMetrics error_state{};
   error_state.state = telemetry::ChannelState::ERROR_STATE;
   error_state.decode_failure_count = 1;
-  exporter.UpdateChannelMetrics(221, error_state);
+  exporter.SubmitChannelMetrics(221, error_state);
 
   ASSERT_TRUE(exporter.GetChannelMetrics(221, metrics_b));
   EXPECT_EQ(metrics_b.state, telemetry::ChannelState::ERROR_STATE);

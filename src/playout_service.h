@@ -6,6 +6,7 @@
 #ifndef RETROVUE_PLAYOUT_SERVICE_H_
 #define RETROVUE_PLAYOUT_SERVICE_H_
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -17,6 +18,8 @@
 #include "retrovue/decode/FrameProducer.h"
 #include "retrovue/renderer/FrameRenderer.h"
 #include "retrovue/telemetry/MetricsExporter.h"
+#include "retrovue/runtime/OrchestrationLoop.h"
+#include "retrovue/runtime/PlayoutControlStateMachine.h"
 #include "retrovue/timing/MasterClock.h"
 
 namespace retrovue {
@@ -32,6 +35,10 @@ struct ChannelWorker {
   std::unique_ptr<buffer::FrameRingBuffer> ring_buffer;
   std::unique_ptr<decode::FrameProducer> producer;
   std::unique_ptr<renderer::FrameRenderer> renderer;
+  std::unique_ptr<runtime::OrchestrationLoop> orchestration_loop;
+  std::unique_ptr<runtime::PlayoutControlStateMachine> control;
+  std::shared_ptr<std::atomic<bool>> underrun_active;
+  std::shared_ptr<std::atomic<bool>> overrun_active;
   
   ChannelWorker(int32_t id, const std::string& plan, int32_t p)
       : channel_id(id), plan_handle(plan), port(p) {}

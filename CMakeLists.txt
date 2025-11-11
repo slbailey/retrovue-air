@@ -91,6 +91,8 @@ add_executable(retrovue_air
     src/decode/FrameProducer.cpp
     src/decode/FFmpegDecoder.cpp
     src/renderer/FrameRenderer.cpp
+    src/runtime/OrchestrationLoop.cpp
+    src/runtime/PlayoutControlStateMachine.cpp
     src/telemetry/MetricsExporter.cpp
     src/telemetry/MetricsHTTPServer.cpp
     src/timing/SystemMasterClock.cpp
@@ -99,6 +101,8 @@ add_executable(retrovue_air
     include/retrovue/decode/FrameProducer.h
     include/retrovue/decode/FFmpegDecoder.h
     include/retrovue/renderer/FrameRenderer.h
+    include/retrovue/runtime/OrchestrationLoop.h
+    include/retrovue/runtime/PlayoutControlStateMachine.h
     include/retrovue/telemetry/MetricsExporter.h
     include/retrovue/telemetry/MetricsHTTPServer.h)
 
@@ -273,6 +277,83 @@ if(GTest_FOUND)
         COMMAND contracts_metricsandtiming_tests
                 --gtest_filter=MetricsAndTimingContractTest.MT_002_PtsToUtcMappingStable)
 
+    # Contract Tests: Metrics Export
+    add_executable(contracts_metricsexport_tests
+        tests/ContractRegistry.cpp
+        tests/contracts/ContractRegistryEnvironment.cpp
+        tests/contracts/ContractRegistrySanityTest.cpp
+        tests/contracts/MetricsExport/MetricsExportContractTests.cpp
+        src/telemetry/MetricsExporter.cpp
+        src/telemetry/MetricsHTTPServer.cpp)
+
+    target_link_libraries(contracts_metricsexport_tests
+        PRIVATE
+            GTest::gtest
+            GTest::gtest_main)
+
+    target_compile_definitions(contracts_metricsexport_tests
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
+
+    target_include_directories(contracts_metricsexport_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
+    add_test(NAME contracts_metricsexport COMMAND contracts_metricsexport_tests)
+
+    # Contract Tests: Playout Control
+    add_executable(contracts_playoutcontrol_tests
+        tests/ContractRegistry.cpp
+        tests/contracts/ContractRegistryEnvironment.cpp
+        tests/contracts/ContractRegistrySanityTest.cpp
+        tests/contracts/PlayoutControl/PlayoutControlContractTests.cpp
+        src/runtime/PlayoutControlStateMachine.cpp)
+
+    target_link_libraries(contracts_playoutcontrol_tests
+        PRIVATE
+            GTest::gtest
+            GTest::gtest_main)
+
+    target_compile_definitions(contracts_playoutcontrol_tests
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
+
+    target_include_directories(contracts_playoutcontrol_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
+    add_test(NAME contracts_playoutcontrol COMMAND contracts_playoutcontrol_tests)
+
+    # Contract Tests: Orchestration Loop
+    add_executable(contracts_orchestrationloop_tests
+        tests/ContractRegistry.cpp
+        tests/contracts/ContractRegistryEnvironment.cpp
+        tests/contracts/ContractRegistrySanityTest.cpp
+        tests/contracts/OrchestrationLoop/OrchestrationLoopContractTests.cpp
+        src/runtime/OrchestrationLoop.cpp
+        src/timing/SystemMasterClock.cpp)
+
+    target_link_libraries(contracts_orchestrationloop_tests
+        PRIVATE
+            GTest::gtest
+            GTest::gtest_main)
+
+    target_compile_definitions(contracts_orchestrationloop_tests
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
+
+    target_include_directories(contracts_orchestrationloop_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
+    add_test(NAME contracts_orchestrationloop COMMAND contracts_orchestrationloop_tests)
+
     # Contract Tests: Playout Engine
     add_executable(contracts_playoutengine_tests
         tests/ContractRegistry.cpp
@@ -380,6 +461,8 @@ if(GTest_FOUND)
         src/decode/FrameProducer.cpp
         src/decode/FFmpegDecoder.cpp
         src/playout_service.cpp
+        src/runtime/OrchestrationLoop.cpp
+    src/runtime/PlayoutControlStateMachine.cpp
         src/renderer/FrameRenderer.cpp
         src/telemetry/MetricsExporter.cpp
         src/telemetry/MetricsHTTPServer.cpp

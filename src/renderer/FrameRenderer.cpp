@@ -124,6 +124,17 @@ bool FrameRenderer::Start() {
 
   stop_requested_.store(false, std::memory_order_release);
   
+  if (metrics_) {
+    telemetry::ChannelMetrics initial_snapshot;
+    initial_snapshot.state = telemetry::ChannelState::READY;
+    initial_snapshot.buffer_depth_frames = input_buffer_.Size();
+    initial_snapshot.frame_gap_seconds = 0.0;
+    initial_snapshot.corrections_total = stats_.corrections_total;
+    std::cout << "[FrameRenderer] Registering channel " << channel_id_
+              << " with MetricsExporter" << std::endl;
+    metrics_->SubmitChannelMetrics(channel_id_, initial_snapshot);
+  }
+
   render_thread_ = std::make_unique<std::thread>(&FrameRenderer::RenderLoop, this);
   
   std::cout << "[FrameRenderer] Started" << std::endl;
@@ -144,6 +155,19 @@ void FrameRenderer::Stop() {
 
   render_thread_.reset();
   running_.store(false, std::memory_order_release);
+
+  if (metrics_) {
+    telemetry::ChannelMetrics final_snapshot;
+    if (!metrics_->GetChannelMetrics(channel_id_, final_snapshot)) {
+      final_snapshot = telemetry::ChannelMetrics{};
+    }
+    final_snapshot.buffer_depth_frames = input_buffer_.Size();
+    final_snapshot.frame_gap_seconds = stats_.frame_gap_ms / 1000.0;
+    final_snapshot.corrections_total = stats_.corrections_total;
+    std::cout << "[FrameRenderer] Flushing final metrics snapshot for channel "
+              << channel_id_ << std::endl;
+    metrics_->SubmitChannelMetrics(channel_id_, final_snapshot);
+  }
   
   std::cout << "[FrameRenderer] Stopped. Total frames rendered: " 
             << stats_.frames_rendered << std::endl;
@@ -292,7 +316,7 @@ void FrameRenderer::PublishMetrics(double frame_gap_ms) {
   snapshot.buffer_depth_frames = input_buffer_.Size();
   snapshot.frame_gap_seconds = frame_gap_ms / 1000.0;
   snapshot.corrections_total = stats_.corrections_total;
-  metrics_->UpdateChannelMetrics(channel_id_, snapshot);
+  metrics_->SubmitChannelMetrics(channel_id_, snapshot);
 }
 
 // ============================================================================

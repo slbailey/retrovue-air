@@ -35,7 +35,7 @@ public:
     runtime.producer = std::make_unique<retrovue::decode::FrameProducer>(config, *runtime.buffer);
     runtime.state = retrovue::telemetry::ChannelState::BUFFERING;
 
-    exporter.UpdateChannelMetrics(channel_id, ToMetrics(runtime));
+    exporter.SubmitChannelMetrics(channel_id, ToMetrics(runtime));
     runtime.producer->Start();
     WaitForMinimumDepth(*runtime.buffer, exporter, runtime.channel_id, runtime.state);
     return runtime;
@@ -53,7 +53,7 @@ public:
       runtime.buffer->Clear();
     }
     runtime.state = retrovue::telemetry::ChannelState::STOPPED;
-    exporter.UpdateChannelMetrics(runtime.channel_id, ToMetrics(runtime));
+    exporter.SubmitChannelMetrics(runtime.channel_id, ToMetrics(runtime));
   }
 
 private:
@@ -71,7 +71,7 @@ private:
       if (std::chrono::steady_clock::now() - start > kTimeout)
       {
         state = retrovue::telemetry::ChannelState::BUFFERING;
-        exporter.UpdateChannelMetrics(channel_id,
+        exporter.SubmitChannelMetrics(channel_id,
                                       ToMetrics(buffer.Size(),
                                                 state));
         return;
@@ -80,7 +80,7 @@ private:
     }
 
     state = retrovue::telemetry::ChannelState::READY;
-    exporter.UpdateChannelMetrics(channel_id,
+    exporter.SubmitChannelMetrics(channel_id,
                                   ToMetrics(buffer.Size(),
                                             state));
   }
