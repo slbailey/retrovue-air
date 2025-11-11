@@ -1,32 +1,89 @@
 {
-  "version": 3,
+  "version": 5,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 22
+    "minor": 22,
+    "patch": 0
   },
   "configurePresets": [
     {
-      "name": "windows-x64",
-      "displayName": "Retrovue Air — Windows x64 with vcpkg",
-      "generator": "Visual Studio 17 2022",
-      "binaryDir": "${sourceDir}/build",
+      "name": "windows-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
       "cacheVariables": {
-        "CMAKE_TOOLCHAIN_FILE": "C:/Users/slbai/source/vcpkg/scripts/buildsystems/vcpkg.cmake",
-        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_C_COMPILER": "cl.exe",
+        "CMAKE_CXX_COMPILER": "cl.exe"
+      }
+    },
+    {
+      "name": "windows-debug",
+      "inherits": "windows-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "windows-release",
+      "inherits": "windows-base",
+      "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
     }
   ],
   "buildPresets": [
     {
-      "name": "build",
-      "configurePreset": "windows-x64",
-      "configuration": "Release"
+      "name": "windows-debug-build",
+      "configurePreset": "windows-debug"
     },
     {
-      "name": "debug",
-      "configurePreset": "windows-x64",
-      "configuration": "Debug"
+      "name": "windows-release-build",
+      "configurePreset": "windows-release"
+    },
+    {
+      "name": "windows-debug-tests",
+      "configurePreset": "windows-debug",
+      "targets": [
+        "test_buffer",
+        "test_decode",
+        "contracts_masterclock_tests",
+        "contracts_metricsandtiming_tests",
+        "contracts_playoutengine_tests",
+        "contracts_renderer_tests",
+        "integration_frame_cadence_tests",
+        "timing_soak"
+      ]
+    },
+    {
+      "name": "windows-release-tests",
+      "configurePreset": "windows-release",
+      "targets": [
+        "test_buffer",
+        "test_decode",
+        "contracts_masterclock_tests",
+        "contracts_metricsandtiming_tests",
+        "contracts_playoutengine_tests",
+        "contracts_renderer_tests",
+        "integration_frame_cadence_tests",
+        "timing_soak"
+      ]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-debug-ctest",
+      "configurePreset": "windows-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-release-ctest",
+      "configurePreset": "windows-release",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

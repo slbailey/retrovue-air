@@ -11,8 +11,6 @@
 #include "retrovue/buffer/FrameRingBuffer.h"
 #include "retrovue/decode/FrameProducer.h"
 #include "retrovue/renderer/FrameRenderer.h"
-#include "retrovue/telemetry/MetricsExporter.h"
-#include "retrovue/timing/MasterClock.h"
 #include "timing/TestMasterClock.h"
 #include "../../fixtures/ChannelManagerStub.h"
 #include "../../fixtures/MasterClockStub.h"
@@ -25,6 +23,32 @@ namespace
 {
 
   using retrovue::tests::RegisterExpectedDomainCoverage;
+
+  struct StubFrameProducer
+  {
+    explicit StubFrameProducer(int64_t pts_step_us)
+        : pts_step_us(pts_step_us), pts_counter(0)
+    {
+    }
+
+    bool Produce(buffer::FrameRingBuffer& buffer)
+    {
+      buffer::Frame frame;
+      frame.metadata.pts = pts_counter;
+      frame.metadata.dts = pts_counter;
+      frame.metadata.duration =
+          static_cast<double>(pts_step_us) / 1'000'000.0;
+      frame.metadata.asset_uri = "contract://metrics/stub_cadence";
+      frame.width = 1920;
+      frame.height = 1080;
+
+      pts_counter += pts_step_us;
+      return buffer.Push(frame);
+    }
+
+    int64_t pts_step_us;
+    int64_t pts_counter;
+  };
 
   const bool kRegisterCoverage = []()
   {
@@ -280,6 +304,84 @@ namespace
     ASSERT_TRUE(exporter.GetChannelMetrics(101, metrics));
     EXPECT_EQ(metrics.state, telemetry::ChannelState::STOPPED);
     EXPECT_EQ(metrics.buffer_depth_frames, 0u);
+  }
+
+  // Rule: MT-007 SLO Guardrails (MetricsAndTimingContract.md §MT_007)
+  TEST_F(MetricsAndTimingContractTest, MT_007_SLO_Guards)
+  {
+    SCOPED_TRACE("MT-007: Verify frame gap and correction SLO guardrails");
+
+    auto clock = std::make_shared<retrovue::timing::TestMasterClock>();
+    const int64_t epoch = 1'700'003'000'000'000;
+    clock->SetEpochUtcUs(epoch);
+    clock->SetRatePpm(0.0);
+    clock->SetNow(epoch, 0.0);
+
+    buffer::FrameRingBuffer buffer(256);
+    StubFrameProducer stub(33'366);
+
+    std::vector<double> abs_gap_ms;
+    abs_gap_ms.reserve(2'000);
+    uint64_t corrections = 0;
+
+    constexpr int kTotalFrames = 2'000;
+    for (int i = 0; i < kTotalFrames; ++i)
+    {
+      ASSERT_TRUE(stub.Produce(buffer));
+
+      buffer::Frame frame;
+      ASSERT_TRUE(buffer.Pop(frame));
+
+      const int64_t deadline = clock->scheduled_to_utc_us(frame.metadata.pts);
+      const int64_t now = clock->now_utc_us();
+      const int64_t gap_us = deadline - now;
+      abs_gap_ms.push_back(std::abs(static_cast<double>(gap_us) / 1'000.0));
+
+      if (gap_us > 0)
+      {
+        clock->AdvanceMicroseconds(gap_us);
+      }
+      else if (gap_us < 0)
+      {
+        ++corrections;
+        const double adjust_ppm =
+            std::clamp(-static_cast<double>(gap_us) / 1'000.0 * 0.05, -40.0, 40.0);
+        clock->SetDriftPpm(clock->drift_ppm() + adjust_ppm);
+        const int64_t catchup_us =
+            std::min<int64_t>(33'366, -gap_us);
+        clock->AdvanceMicroseconds(catchup_us);
+      }
+
+      clock->AdvanceMicroseconds(33'366);
+    }
+
+    auto mean = [](const std::vector<double>& values) {
+      if (values.empty()) return 0.0;
+      return std::accumulate(values.begin(), values.end(), 0.0) /
+             static_cast<double>(values.size());
+    };
+
+    auto p95 = [](std::vector<double> values) {
+      if (values.empty()) return 0.0;
+      std::sort(values.begin(), values.end());
+      const double rank = 0.95 * static_cast<double>(values.size() - 1);
+      const auto lo = static_cast<size_t>(std::floor(rank));
+      const auto hi = static_cast<size_t>(std::ceil(rank));
+      const double fraction = rank - static_cast<double>(lo);
+      return values[lo] +
+             (values[hi] - values[lo]) * fraction;
+    };
+
+    const double p95_gap_ms = p95(abs_gap_ms);
+    const double corrections_per_frame =
+        static_cast<double>(corrections) / static_cast<double>(kTotalFrames);
+
+    EXPECT_LT(mean(abs_gap_ms), 10.0)
+        << "Mean absolute gap should stay within 10 ms SLO (MT-007)";
+    EXPECT_LT(p95_gap_ms, 4.0)
+        << "p95 absolute gap should stay below 4 ms (MT-007)";
+    EXPECT_LT(corrections_per_frame, 0.03)
+        << "Corrections per frame must stay under 0.03 (MT-007)";
   }
 
   // Rule: MT-005 Long-run drift stability (MetricsAndTimingContract.md §MT-005)

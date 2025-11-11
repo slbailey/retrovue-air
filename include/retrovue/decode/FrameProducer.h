@@ -13,7 +13,13 @@
 
 #include "retrovue/buffer/FrameRingBuffer.h"
 
+namespace retrovue::timing {
+class MasterClock;
+}
+
 namespace retrovue::decode {
+
+namespace timing = ::retrovue::timing;
 
 // ProducerConfig holds configuration for frame production.
 struct ProducerConfig {
@@ -58,7 +64,8 @@ class FrameProducer {
  public:
   // Constructs a producer with the given configuration and output buffer.
   FrameProducer(const ProducerConfig& config, 
-                buffer::FrameRingBuffer& output_buffer);
+                buffer::FrameRingBuffer& output_buffer,
+                std::shared_ptr<timing::MasterClock> clock = nullptr);
   
   ~FrameProducer();
 
@@ -107,9 +114,12 @@ class FrameProducer {
   
   std::unique_ptr<std::thread> producer_thread_;
   std::unique_ptr<FFmpegDecoder> decoder_;
+  std::shared_ptr<timing::MasterClock> master_clock_;
   
   // State for stub frame generation
   int64_t stub_pts_counter_;
+  int64_t frame_interval_us_;
+  int64_t next_stub_deadline_utc_;
 };
 
 }  // namespace retrovue::decode

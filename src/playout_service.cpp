@@ -84,7 +84,7 @@ grpc::Status PlayoutControlImpl::StartChannel(grpc::ServerContext* context,
 
   // Create producer
   worker->producer = std::make_unique<decode::FrameProducer>(
-      producer_config, *worker->ring_buffer);
+      producer_config, *worker->ring_buffer, master_clock_);
 
   // Start decode thread
   if (!worker->producer->Start()) {
@@ -182,7 +182,7 @@ grpc::Status PlayoutControlImpl::UpdatePlan(grpc::ServerContext* context,
   producer_config.stub_mode = false;  // Phase 3: real decode
 
   worker->producer = std::make_unique<decode::FrameProducer>(
-      producer_config, *worker->ring_buffer);
+      producer_config, *worker->ring_buffer, master_clock_);
 
   if (!worker->producer->Start()) {
     response->set_success(false);

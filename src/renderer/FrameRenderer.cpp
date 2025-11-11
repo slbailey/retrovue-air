@@ -31,11 +31,50 @@ extern "C" {
 namespace retrovue::renderer {
 
 namespace {
-constexpr double kWaitFudgeSeconds = 0.001;          // wake a millisecond early
-constexpr double kDropThresholdSeconds = -0.008;     // drop when we are 8 ms late
-constexpr int kMinDepthForDrop = 5;                  // keep buffer from starving
-constexpr int64_t kSpinThresholdUs = 200;            // busy wait for last 0.2 ms
-constexpr std::chrono::microseconds kSpinSleep(100); // spin sleep granularity
+constexpr double kWaitFudgeSeconds = 0.001;                // wake a millisecond early
+constexpr double kDropThresholdSeconds = -0.008;           // drop when we are 8 ms late (MC-003)
+constexpr int kMinDepthForDrop = 5;                        // keep buffer from starving
+constexpr int64_t kSpinThresholdUs = 200;                  // busy wait for last 0.2 ms
+constexpr int64_t kSpinSleepUs = 100;                      // fine-grained wait window
+constexpr int64_t kEmptyBufferBackoffUs = 5'000;           // MC-004: allow producer to refill
+constexpr int64_t kErrorBackoffUs = 10'000;                // MC-004 recovery assistance
+
+inline void WaitUntilUtc(const std::shared_ptr<timing::MasterClock>& clock,
+                         int64_t target_utc_us) {
+  if (!clock || target_utc_us <= 0) {
+    return;
+  }
+
+  // MC-003: Align renderer pacing with MasterClock monotonic schedule.
+  while (true) {
+    const int64_t now = clock->now_utc_us();
+    const int64_t remaining = target_utc_us - now;
+    if (remaining <= 0) {
+      break;
+    }
+
+    const int64_t sleep_us =
+        (remaining > 2'000) ? remaining - 1'000
+                            : std::max<int64_t>(remaining / 2, 200);
+    std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+  }
+}
+
+inline void WaitForMicros(const std::shared_ptr<timing::MasterClock>& clock,
+                          int64_t duration_us) {
+  if (duration_us <= 0) {
+    return;
+  }
+  if (clock) {
+    WaitUntilUtc(clock, clock->now_utc_us() + duration_us);
+    return;
+  }
+  std::this_thread::sleep_for(std::chrono::microseconds(duration_us));
+}
+
+inline int64_t WaitFudgeUs() {
+  return static_cast<int64_t>(kWaitFudgeSeconds * 1'000'000.0);
+}
 }  // namespace
 
 FrameRenderer::FrameRenderer(const RenderConfig& config,
@@ -50,7 +89,9 @@ FrameRenderer::FrameRenderer(const RenderConfig& config,
       channel_id_(channel_id),
       running_(false),
       stop_requested_(false),
-      last_pts_(0) {}
+      last_pts_(0),
+      last_frame_time_utc_(0),
+      fallback_last_frame_time_(std::chrono::steady_clock::now()) {}
 
 FrameRenderer::~FrameRenderer() { Stop(); }
 
@@ -120,15 +161,25 @@ void FrameRenderer::RenderLoop() {
   }
 
   running_.store(true, std::memory_order_release);
-  last_frame_time_ = std::chrono::steady_clock::now();
+  if (clock_) {
+    last_frame_time_utc_ = clock_->now_utc_us();
+  } else {
+    fallback_last_frame_time_ = std::chrono::steady_clock::now();
+  }
 
   while (!stop_requested_.load(std::memory_order_acquire)) {
-    auto frame_start = std::chrono::steady_clock::now();
+    int64_t frame_start_utc = 0;
+    std::chrono::steady_clock::time_point frame_start_fallback;
+    if (clock_) {
+      frame_start_utc = clock_->now_utc_us();
+    } else {
+      frame_start_fallback = std::chrono::steady_clock::now();
+    }
 
     // Try to pop a frame from the buffer
     buffer::Frame frame;
     if (!input_buffer_.Pop(frame)) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      WaitForMicros(clock_, kEmptyBufferBackoffUs);  // MC-004: allow producer to refill
       stats_.frames_skipped++;
       continue;
     }
@@ -142,28 +193,17 @@ void FrameRenderer::RenderLoop() {
       frame_gap_ms = gap_s * 1000.0;
 
       if (gap_s > 0.0) {
-        const double sleep_s = std::max(0.0, gap_s - kWaitFudgeSeconds);
-        if (sleep_s > 0.0) {
-#ifdef _WIN32
-          HANDLE timer = CreateWaitableTimer(nullptr, TRUE, nullptr);
-          if (timer) {
-            LARGE_INTEGER due_time;
-            due_time.QuadPart = static_cast<LONGLONG>(-sleep_s * 10'000'000.0);
-            SetWaitableTimer(timer, &due_time, 0, nullptr, nullptr, FALSE);
-            WaitForSingleObject(timer, INFINITE);
-            CloseHandle(timer);
-          } else {
-            std::this_thread::sleep_for(std::chrono::duration<double>(sleep_s));
-          }
-#else
-          std::this_thread::sleep_for(std::chrono::duration<double>(sleep_s));
-#endif
-        }
+        const int64_t deadline_utc =
+            clock_->scheduled_to_utc_us(frame.metadata.pts);
+        const int64_t target_utc = deadline_utc - WaitFudgeUs();
+        WaitUntilUtc(clock_, target_utc);  // MC-003: pace rendering to MasterClock
 
         int64_t remaining_us =
             clock_->scheduled_to_utc_us(frame.metadata.pts) - clock_->now_utc_us();
         while (remaining_us > kSpinThresholdUs) {
-          std::this_thread::sleep_for(kSpinSleep);
+          const int64_t spin_us =
+              std::min<int64_t>(remaining_us / 2, kSpinSleepUs);
+          WaitForMicros(clock_, spin_us);
           remaining_us =
               clock_->scheduled_to_utc_us(frame.metadata.pts) - clock_->now_utc_us();
         }
@@ -177,15 +217,32 @@ void FrameRenderer::RenderLoop() {
     } else {
       auto now = std::chrono::steady_clock::now();
       frame_gap_ms =
-          std::chrono::duration<double, std::milli>(now - last_frame_time_).count();
-      last_frame_time_ = now;
+          std::chrono::duration<double, std::milli>(now - fallback_last_frame_time_).count();
+      fallback_last_frame_time_ = now;
     }
 
     RenderFrame(frame);
 
-    auto frame_end = std::chrono::steady_clock::now();
-    double render_time_ms =
-        std::chrono::duration<double, std::milli>(frame_end - frame_start).count();
+    int64_t frame_end_utc = 0;
+    std::chrono::steady_clock::time_point frame_end_fallback;
+    if (clock_) {
+      frame_end_utc = clock_->now_utc_us();
+    } else {
+      frame_end_fallback = std::chrono::steady_clock::now();
+    }
+
+    double render_time_ms = 0.0;
+    if (clock_) {
+      render_time_ms =
+          static_cast<double>(frame_end_utc - frame_start_utc) / 1'000.0;
+      last_frame_time_utc_ = frame_end_utc;
+    } else {
+      render_time_ms =
+          std::chrono::duration<double, std::milli>(frame_end_fallback - frame_start_fallback)
+              .count();
+      fallback_last_frame_time_ = frame_end_fallback;
+    }
+
     UpdateStats(render_time_ms, frame_gap_ms);
     PublishMetrics(frame_gap_ms);
 
@@ -198,7 +255,6 @@ void FrameRenderer::RenderLoop() {
     }
 
     last_pts_ = frame.metadata.pts;
-    last_frame_time_ = frame_end;
   }
 
   // Cleanup renderer

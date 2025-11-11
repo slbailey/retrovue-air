@@ -1,6 +1,6 @@
 # RetroVue Playout — Phase 3 Documentation Index
 
-**Status**: Phase 3 Complete | **Last Updated**: 2025-11-08
+**Status**: Phase 3 Complete | **Last Updated**: 2025-11-11
 
 ---
 
@@ -22,6 +22,7 @@
 | **Architecture Overview**     | ✅           | ✅ Complete |
 | **Development Standards**     | ✅           | ✅ Complete |
 | **Runtime Model**             | ✅           | ✅ Complete |
+| **Timing Scenarios**          | ✅           | ✅ Complete |
 
 ---
 
@@ -319,6 +320,7 @@ Contract documents define **how** to validate subsystem behavior through testing
 - [Playout Engine Contract](contracts/PlayoutEngineContract.md)
 - [Renderer Contract](contracts/RendererContract.md)
 - [Metrics and Timing Contract](contracts/MetricsAndTimingContract.md)
+- [Timing Scenarios](tests/TimingScenarios.md)
 
 **Milestones & Planning**:
 - [Phase 1 Complete](milestones/Phase1_Complete.md)

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(retrovue_playout LANGUAGES CXX)
+project(retrovue_air LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,6 +17,8 @@ if(PkgConfig_FOUND)
         libavcodec
         libavutil
         libswscale)
+else()
+    message(WARNING "PkgConfig not found - FFmpeg detection unavailable. Install pkg-config to build with FFmpeg.")
 endif()
 
 if(FFMPEG_FOUND)
@@ -56,15 +58,15 @@ add_custom_command(
 set_source_files_properties(${GENERATED_PROTO_SRCS} ${GENERATED_PROTO_HDRS}
                             PROPERTIES GENERATED TRUE)
 
-add_library(retrovue_playout_proto STATIC
+add_library(retrovue_air_proto STATIC
     ${GENERATED_PROTO_SRCS}
     ${GENERATED_PROTO_HDRS})
 
-target_include_directories(retrovue_playout_proto
+target_include_directories(retrovue_air_proto
     PUBLIC
         ${GENERATED_DIR})
 
-target_link_libraries(retrovue_playout_proto
+target_link_libraries(retrovue_air_proto
     PUBLIC
         protobuf::libprotobuf
         gRPC::grpc++
@@ -72,17 +74,17 @@ target_link_libraries(retrovue_playout_proto
 
 source_group(TREE ${GENERATED_DIR} FILES ${GENERATED_PROTO_SRCS} ${GENERATED_PROTO_HDRS})
 
-add_executable(retrovue_playout_proto_check
+add_executable(retrovue_air_proto_check
     tools/check_api_version.cpp)
 
-target_link_libraries(retrovue_playout_proto_check
-    PRIVATE retrovue_playout_proto)
+target_link_libraries(retrovue_air_proto_check
+    PRIVATE retrovue_air_proto)
 
-target_include_directories(retrovue_playout_proto_check
+target_include_directories(retrovue_air_proto_check
     PRIVATE ${GENERATED_DIR})
 
 # Main playout engine executable
-add_executable(retrovue_playout
+add_executable(retrovue_air
     src/main.cpp
     src/playout_service.cpp
     src/buffer/FrameRingBuffer.cpp
@@ -100,12 +102,16 @@ add_executable(retrovue_playout
     include/retrovue/telemetry/MetricsExporter.h
     include/retrovue/telemetry/MetricsHTTPServer.h)
 
-target_link_libraries(retrovue_playout
+target_link_libraries(retrovue_air
     PRIVATE 
-        retrovue_playout_proto)
+        retrovue_air_proto)
+
+target_compile_definitions(retrovue_air
+    PRIVATE
+        RETROVUE_TIMING_STRICT=ON)
 
 if(FFMPEG_FOUND)
-    target_link_libraries(retrovue_playout PRIVATE PkgConfig::FFMPEG)
+    target_link_libraries(retrovue_air PRIVATE PkgConfig::FFMPEG)
 endif()
 
 # SDL2 libraries for Phase 3 preview renderer (optional)
@@ -113,7 +119,7 @@ find_package(SDL2 CONFIG)
 if(SDL2_FOUND)
     message(STATUS "SDL2 found - preview renderer enabled")
     add_compile_definitions(RETROVUE_SDL2_AVAILABLE)
-    target_link_libraries(retrovue_playout PRIVATE SDL2::SDL2 SDL2::SDL2main)
+    target_link_libraries(retrovue_air PRIVATE SDL2::SDL2 SDL2::SDL2main)
 else()
     message(WARNING "SDL2 not found - preview renderer disabled. Install SDL2 for preview window support.")
 endif()
@@ -124,10 +130,10 @@ if(WIN32)
 else()
     # Unix systems need pthread
     find_package(Threads REQUIRED)
-    target_link_libraries(retrovue_playout PRIVATE Threads::Threads)
+    target_link_libraries(retrovue_air PRIVATE Threads::Threads)
 endif()
 
-target_include_directories(retrovue_playout
+target_include_directories(retrovue_air
     PUBLIC
         ${PROJECT_SOURCE_DIR}/include
     PRIVATE
@@ -139,27 +145,31 @@ if(GTest_FOUND)
     message(STATUS "GTest found - building unit tests")
     enable_testing()
 
-    # Test: Frame Ring Buffer
-    add_executable(test_buffer
+    # Unit Test: Frame Ring Buffer
+    add_executable(unit_buffer
         tests/test_buffer.cpp
         src/buffer/FrameRingBuffer.cpp
         include/retrovue/buffer/FrameRingBuffer.h)
 
-    target_link_libraries(test_buffer
+    target_link_libraries(unit_buffer
         PRIVATE
             GTest::gtest
             GTest::gtest_main)
 
-    target_include_directories(test_buffer
+    target_compile_definitions(unit_buffer
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
+
+    target_include_directories(unit_buffer
         PUBLIC
             ${PROJECT_SOURCE_DIR}/include
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-    add_test(NAME test_buffer COMMAND test_buffer)
+    add_test(NAME unit_buffer COMMAND unit_buffer)
 
-    # Test: Frame Producer
-    add_executable(test_decode
+    # Unit Test: Frame Producer
+    add_executable(unit_decode
         tests/test_decode.cpp
         src/decode/FrameProducer.cpp
         src/decode/FFmpegDecoder.cpp
@@ -168,18 +178,22 @@ if(GTest_FOUND)
         src/buffer/FrameRingBuffer.cpp
         include/retrovue/buffer/FrameRingBuffer.h)
 
-    target_link_libraries(test_decode
+    target_link_libraries(unit_decode
         PRIVATE
             GTest::gtest
             GTest::gtest_main)
 
-    target_include_directories(test_decode
+    target_compile_definitions(unit_decode
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
+
+    target_include_directories(unit_decode
         PUBLIC
             ${PROJECT_SOURCE_DIR}/include
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-    add_test(NAME test_decode COMMAND test_decode)
+    add_test(NAME unit_decode COMMAND unit_decode)
     
     # Contract Tests: MasterClock
     add_executable(contracts_masterclock_tests
@@ -201,13 +215,17 @@ if(GTest_FOUND)
             GTest::gtest
             GTest::gtest_main)
 
+    target_compile_definitions(contracts_masterclock_tests
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
+
     target_include_directories(contracts_masterclock_tests
         PRIVATE
             ${PROJECT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
-    add_test(NAME MasterClockContract COMMAND contracts_masterclock_tests)
+    add_test(NAME contracts_masterclock COMMAND contracts_masterclock_tests)
 
     # Contract Tests: Metrics & Timing
     add_executable(contracts_metricsandtiming_tests
@@ -228,6 +246,10 @@ if(GTest_FOUND)
         PRIVATE
             GTest::gtest
             GTest::gtest_main)
+
+    target_compile_definitions(contracts_metricsandtiming_tests
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
 
     if(FFMPEG_FOUND)
         target_link_libraries(contracts_metricsandtiming_tests PRIVATE PkgConfig::FFMPEG)
@@ -272,6 +294,10 @@ if(GTest_FOUND)
             GTest::gtest
             GTest::gtest_main)
 
+    target_compile_definitions(contracts_playoutengine_tests
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
+
     if(FFMPEG_FOUND)
         target_link_libraries(contracts_playoutengine_tests PRIVATE PkgConfig::FFMPEG)
     endif()
@@ -305,6 +331,10 @@ if(GTest_FOUND)
             GTest::gtest
             GTest::gtest_main)
 
+    target_compile_definitions(contracts_renderer_tests
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
+
     if(SDL2_FOUND)
         target_link_libraries(contracts_renderer_tests PRIVATE SDL2::SDL2 SDL2::SDL2main)
     endif()
@@ -320,6 +350,70 @@ if(GTest_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
     add_test(NAME contracts_renderer COMMAND contracts_renderer_tests)
+
+    # Integration Test: Frame Cadence
+    add_executable(integration_frame_cadence_tests
+        tests/integration/FrameCadenceIntegrationTests.cpp
+        src/buffer/FrameRingBuffer.cpp
+        src/timing/TestMasterClock.cpp)
+
+    target_link_libraries(integration_frame_cadence_tests
+        PRIVATE
+            GTest::gtest
+            GTest::gtest_main)
+
+    target_compile_definitions(integration_frame_cadence_tests
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
+
+    target_include_directories(integration_frame_cadence_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
+    add_test(NAME integration_frame_cadence COMMAND integration_frame_cadence_tests)
+
+    add_executable(timing_soak
+        tools/soak/TimingSoak.cpp
+        src/buffer/FrameRingBuffer.cpp
+        src/decode/FrameProducer.cpp
+        src/decode/FFmpegDecoder.cpp
+        src/playout_service.cpp
+        src/renderer/FrameRenderer.cpp
+        src/telemetry/MetricsExporter.cpp
+        src/telemetry/MetricsHTTPServer.cpp
+        src/timing/SystemMasterClock.cpp
+        src/timing/TestMasterClock.cpp)
+
+    target_link_libraries(timing_soak
+        PRIVATE
+            retrovue_air_proto
+            protobuf::libprotobuf
+            gRPC::grpc++
+            gRPC::grpc++_reflection)
+
+    target_compile_definitions(timing_soak
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
+
+    target_include_directories(timing_soak
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
+    if(FFMPEG_FOUND)
+        target_link_libraries(timing_soak PRIVATE PkgConfig::FFMPEG)
+    endif()
+
+    if(SDL2_FOUND)
+        target_link_libraries(timing_soak PRIVATE SDL2::SDL2 SDL2::SDL2main)
+    endif()
+
+    if(NOT WIN32)
+        target_link_libraries(timing_soak PRIVATE Threads::Threads)
+    endif()
 else()
     message(WARNING "GTest not found - skipping unit tests. Install via: vcpkg install gtest")
 endif()

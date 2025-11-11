@@ -152,7 +152,8 @@ class FrameRenderer {
   std::unique_ptr<std::thread> render_thread_;
   
   int64_t last_pts_;
-  std::chrono::steady_clock::time_point last_frame_time_;
+  int64_t last_frame_time_utc_;
+  std::chrono::steady_clock::time_point fallback_last_frame_time_;
 };
 
 // HeadlessRenderer consumes frames without displaying them.

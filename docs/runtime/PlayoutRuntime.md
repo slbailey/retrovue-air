@@ -26,6 +26,23 @@ Explain the execution model, threading, timing rules, and operational safeguards
 - Slate insertion occurs when available frames drop below 30, preventing Renderer starvation.
 - Renderer consumption is intentionally decoupled from decode timing, keeping output aligned with the MasterClock.
 
+## Timing telemetry flow
+
+- MasterClock publishes monotonic UTC deadlines and correction signals that gate Renderer pacing.
+- Renderer compares in-flight frames against MasterClock deadlines before packaging transport stream output.
+- Metrics exporter samples both MasterClock state and Renderer gap measurements to expose Prometheus gauges.
+
+```mermaid
+flowchart LR
+    MC[MasterClock\n(now, drift_ppm, corrections)]
+    R(Renderer\nframe pacing & buffering)
+    M[Metrics Exporter\nPrometheus scrape]
+
+    MC --> R
+    R --> M
+    MC --> M
+```
+
 ## Resource management
 
 - Every channel owns a memory budget for frame staging (default 90 frames is approximately 3 s at 30 fps).
@@ -57,4 +74,3 @@ Explain the execution model, threading, timing rules, and operational safeguards
 - [Architecture overview](../architecture/ArchitectureOverview.md)
 - [Deployment integration](../infra/Integration.md)
 - [RetroVue renderer runtime](../../Retrovue/docs/runtime/Renderer.md)
-

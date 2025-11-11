@@ -6,21 +6,65 @@
 #include "retrovue/decode/FrameProducer.h"
 #include "retrovue/decode/FFmpegDecoder.h"
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <thread>
+#include "retrovue/timing/MasterClock.h"
 
 namespace retrovue::decode {
 
+namespace {
+constexpr int64_t kProducerBackoffUs = 10'000;  // MC-004 recovery backoff
+constexpr int64_t kDecoderUnavailableBackoffUs = 100'000;
+
+inline void WaitUntilUtc(const std::shared_ptr<timing::MasterClock>& clock,
+                         int64_t target_utc_us) {
+  if (!clock || target_utc_us <= 0) {
+    return;
+  }
+
+  // MC-003: adhere to MasterClock pacing rather than wall time.
+  while (true) {
+    const int64_t now = clock->now_utc_us();
+    const int64_t remaining = target_utc_us - now;
+    if (remaining <= 0) {
+      break;
+    }
+    const int64_t sleep_us =
+        (remaining > 2'000) ? remaining - 1'000
+                            : std::max<int64_t>(remaining / 2, 200);
+    std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+  }
+}
+
+inline void WaitForMicros(const std::shared_ptr<timing::MasterClock>& clock,
+                          int64_t duration_us) {
+  if (duration_us <= 0) {
+    return;
+  }
+  if (clock) {
+    WaitUntilUtc(clock, clock->now_utc_us() + duration_us);
+    return;
+  }
+  std::this_thread::sleep_for(std::chrono::microseconds(duration_us));
+}
+}  // namespace
+
 FrameProducer::FrameProducer(const ProducerConfig& config,
-                             buffer::FrameRingBuffer& output_buffer)
+                             buffer::FrameRingBuffer& output_buffer,
+                             std::shared_ptr<timing::MasterClock> clock)
     : config_(config),
       output_buffer_(output_buffer),
       running_(false),
       stop_requested_(false),
       frames_produced_(0),
       buffer_full_count_(0),
-      stub_pts_counter_(0) {
+      master_clock_(std::move(clock)),
+      stub_pts_counter_(0),
+      frame_interval_us_(static_cast<int64_t>(
+          std::max(1.0, std::round(1'000'000.0 / config_.target_fps)))),
+      next_stub_deadline_utc_(0) {
 }
 
 FrameProducer::~FrameProducer() {
@@ -83,23 +127,12 @@ void FrameProducer::ProduceLoop() {
   }
 
   // Calculate frame interval based on target FPS (for stub mode)
-  const auto frame_interval = std::chrono::microseconds(
-      static_cast<int64_t>(1000000.0 / config_.target_fps));
-
   while (!stop_requested_.load(std::memory_order_acquire)) {
-    auto frame_start = std::chrono::steady_clock::now();
-
     if (config_.stub_mode) {
-      ProduceStubFrame();
-      
-      // Sleep to maintain target frame rate in stub mode
-      auto frame_end = std::chrono::steady_clock::now();
-      auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-          frame_end - frame_start);
-      
-      if (elapsed < frame_interval) {
-        std::this_thread::sleep_for(frame_interval - elapsed);
+      if (master_clock_ && next_stub_deadline_utc_ == 0) {
+        next_stub_deadline_utc_ = master_clock_->now_utc_us();
       }
+      ProduceStubFrame();
     } else {
       ProduceRealFrame();
       // No artificial delay needed - real decode has its own timing
@@ -122,7 +155,8 @@ void FrameProducer::ProduceStubFrame() {
   // Set metadata
   frame.metadata.pts = stub_pts_counter_;
   frame.metadata.dts = stub_pts_counter_;
-  frame.metadata.duration = 1.0 / config_.target_fps;
+  frame.metadata.duration =
+      static_cast<double>(frame_interval_us_) / 1'000'000.0;
   frame.metadata.asset_uri = config_.asset_uri;
   
   // Set dimensions
@@ -150,18 +184,28 @@ void FrameProducer::ProduceStubFrame() {
   // Try to push frame into buffer
   if (output_buffer_.Push(frame)) {
     frames_produced_.fetch_add(1, std::memory_order_relaxed);
-    stub_pts_counter_++;
+    stub_pts_counter_ += frame_interval_us_;
+
+    if (master_clock_) {
+      if (next_stub_deadline_utc_ == 0) {
+        next_stub_deadline_utc_ = master_clock_->now_utc_us();
+      }
+      next_stub_deadline_utc_ += frame_interval_us_;
+      WaitUntilUtc(master_clock_, next_stub_deadline_utc_);
+    } else {
+      WaitForMicros(nullptr, frame_interval_us_);
+    }
   } else {
-    // Buffer full - back off slightly
+    // MC-004: allow downstream consumer to recover before retrying.
     buffer_full_count_.fetch_add(1, std::memory_order_relaxed);
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    WaitForMicros(master_clock_, kProducerBackoffUs);
   }
 }
 
 void FrameProducer::ProduceRealFrame() {
   if (!decoder_ || !decoder_->IsOpen()) {
     std::cerr << "[FrameProducer] Decoder not available" << std::endl;
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    WaitForMicros(master_clock_, kDecoderUnavailableBackoffUs);  // MC-004 recovery window
     return;
   }
 
@@ -178,7 +222,7 @@ void FrameProducer::ProduceRealFrame() {
       }
       
       // Back off slightly on errors or full buffer
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      WaitForMicros(master_clock_, kProducerBackoffUs);  // MC-004: avoid hammering buffer
       buffer_full_count_.fetch_add(1, std::memory_order_relaxed);
     }
     return;
