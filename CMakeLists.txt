@@ -224,6 +224,7 @@ if(GTest_FOUND)
         tests/contracts/ContractRegistryEnvironment.cpp
         tests/contracts/MetricsAndTiming/MetricsAndTimingContractTests.cpp
         tests/contracts/MetricsAndTiming/MT_005_LongRunDriftStability.cpp
+        tests/contracts/MetricsAndTiming/MT_006_FeedbackConvergence.cpp
         src/buffer/FrameRingBuffer.cpp
         src/decode/FrameProducer.cpp
         src/decode/FFmpegDecoder.cpp
