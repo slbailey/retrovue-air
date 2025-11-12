@@ -127,6 +127,14 @@ void MetricsExporter::Stop() {
 
 bool MetricsExporter::SubmitChannelMetrics(int32_t channel_id,
                                            const ChannelMetrics& metrics) {
+  if (!running_.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> lock(metrics_mutex_);
+    channel_metrics_[channel_id] = metrics;
+    std::cout << "[MetricsExporter] (sync) snapshot written for channel "
+              << channel_id << std::endl;
+    return true;
+  }
+
   Event event{};
   event.type = Event::Type::kUpdateChannel;
   event.channel_id = channel_id;
@@ -147,6 +155,14 @@ bool MetricsExporter::SubmitChannelMetrics(int32_t channel_id,
 }
 
 void MetricsExporter::SubmitChannelRemoval(int32_t channel_id) {
+  if (!running_.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> lock(metrics_mutex_);
+    channel_metrics_.erase(channel_id);
+    std::cout << "[MetricsExporter] (sync) channel " << channel_id
+              << " removed from metrics" << std::endl;
+    return;
+  }
+
   Event event{};
   event.type = Event::Type::kRemoveChannel;
   event.channel_id = channel_id;
@@ -166,6 +182,15 @@ void MetricsExporter::SubmitChannelRemoval(int32_t channel_id) {
 
 void MetricsExporter::RegisterMetricDescriptor(const std::string& name,
                                                const std::string& version) {
+  if (!running_.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> lock(metrics_mutex_);
+    descriptor_versions_[name] = version;
+    descriptor_deprecated_[name] = false;
+    std::cout << "[MetricsExporter] (sync) registered descriptor "
+              << name << " version " << version << std::endl;
+    return;
+  }
+
   Event event{};
   event.type = Event::Type::kRegisterDescriptor;
   event.descriptor_name = name;
@@ -183,6 +208,13 @@ void MetricsExporter::RegisterMetricDescriptor(const std::string& name,
 }
 
 void MetricsExporter::DeprecateMetricDescriptor(const std::string& name) {
+  if (!running_.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> lock(metrics_mutex_);
+    descriptor_deprecated_[name] = true;
+    std::cout << "[MetricsExporter] (sync) deprecated descriptor " << name << std::endl;
+    return;
+  }
+
   Event event{};
   event.type = Event::Type::kDeprecateDescriptor;
   event.descriptor_name = name;
@@ -201,6 +233,21 @@ void MetricsExporter::DeprecateMetricDescriptor(const std::string& name) {
 void MetricsExporter::RecordDeliveryStatus(Transport transport,
                                            bool success,
                                            double latency_ms) {
+  if (!running_.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> lock(metrics_mutex_);
+    auto& data = transport_data_[transport];
+    data.latencies_ms.push_back(latency_ms);
+    if (success) {
+      data.deliveries++;
+    } else {
+      data.failures++;
+    }
+    std::cout << "[MetricsExporter] (sync) recorded transport delivery (transport="
+              << static_cast<int>(transport) << ", success=" << std::boolalpha << success
+              << ", latency_ms=" << latency_ms << ")" << std::endl;
+    return;
+  }
+
   Event event{};
   event.type = Event::Type::kRecordTransport;
   event.transport = transport;
@@ -249,6 +296,10 @@ MetricsExporter::Snapshot MetricsExporter::SnapshotForTest() const {
 }
 
 bool MetricsExporter::WaitUntilDrainedForTest(std::chrono::milliseconds timeout) {
+  if (!running_.load(std::memory_order_acquire)) {
+    return true;
+  }
+
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     if (processed_events_.load(std::memory_order_acquire) >=

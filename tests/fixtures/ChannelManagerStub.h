@@ -2,6 +2,7 @@
 #define RETROVUE_TESTS_FIXTURES_CHANNEL_MANAGER_STUB_H_
 
 #include <chrono>
+#include <iostream>
 #include <cstdint>
 #include <memory>
 #include <thread>
@@ -41,19 +42,47 @@ public:
     return runtime;
   }
 
-  void StopChannel(ChannelRuntime& runtime,
-                   retrovue::telemetry::MetricsExporter& exporter)
+  void RequestTeardown(ChannelRuntime& runtime,
+                       retrovue::telemetry::MetricsExporter& exporter,
+                       const std::string& reason,
+                       std::chrono::milliseconds timeout = std::chrono::milliseconds(500))
   {
+    if (runtime.producer)
+    {
+      runtime.producer->RequestTeardown(timeout);
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    while (runtime.producer && runtime.producer->IsRunning())
+    {
+      if (std::chrono::steady_clock::now() - start > timeout)
+      {
+        std::cerr << "[ChannelManagerStub] Teardown timed out for channel "
+                  << runtime.channel_id << ", forcing stop" << std::endl;
+        runtime.producer->ForceStop();
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
     if (runtime.producer)
     {
       runtime.producer->Stop();
     }
+
+    runtime.state = retrovue::telemetry::ChannelState::STOPPED;
+    exporter.SubmitChannelMetrics(runtime.channel_id, ToMetrics(runtime));
+    exporter.SubmitChannelRemoval(runtime.channel_id);
+  }
+
+  void StopChannel(ChannelRuntime& runtime,
+                   retrovue::telemetry::MetricsExporter& exporter)
+  {
+    RequestTeardown(runtime, exporter, "ChannelManagerStub::StopChannel");
     if (runtime.buffer)
     {
       runtime.buffer->Clear();
     }
-    runtime.state = retrovue::telemetry::ChannelState::STOPPED;
-    exporter.SubmitChannelMetrics(runtime.channel_id, ToMetrics(runtime));
   }
 
 private:

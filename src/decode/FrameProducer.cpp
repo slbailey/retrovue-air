@@ -61,6 +61,8 @@ FrameProducer::FrameProducer(const ProducerConfig& config,
       frames_produced_(0),
       buffer_full_count_(0),
       master_clock_(std::move(clock)),
+      teardown_requested_(false),
+      drain_timeout_(std::chrono::milliseconds(0)),
       stub_pts_counter_(0),
       frame_interval_us_(static_cast<int64_t>(
           std::max(1.0, std::round(1'000'000.0 / config_.target_fps)))),
@@ -101,6 +103,23 @@ void FrameProducer::Stop() {
             << frames_produced_.load() << std::endl;
 }
 
+void FrameProducer::RequestTeardown(std::chrono::milliseconds drain_timeout) {
+  if (!running_.load(std::memory_order_acquire)) {
+    return;
+  }
+
+  drain_timeout_ = drain_timeout;
+  teardown_deadline_ = std::chrono::steady_clock::now() + drain_timeout_;
+  teardown_requested_.store(true, std::memory_order_release);
+  std::cout << "[FrameProducer] Teardown requested (timeout="
+            << drain_timeout_.count() << " ms)" << std::endl;
+}
+
+void FrameProducer::ForceStop() {
+  stop_requested_.store(true, std::memory_order_release);
+  std::cout << "[FrameProducer] Force stop requested" << std::endl;
+}
+
 void FrameProducer::ProduceLoop() {
   std::cout << "[FrameProducer] Decode loop started (stub_mode=" 
             << (config_.stub_mode ? "true" : "false") << ")" << std::endl;
@@ -128,6 +147,24 @@ void FrameProducer::ProduceLoop() {
 
   // Calculate frame interval based on target FPS (for stub mode)
   while (!stop_requested_.load(std::memory_order_acquire)) {
+    if (teardown_requested_.load(std::memory_order_acquire)) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= teardown_deadline_) {
+        std::cerr << "[FrameProducer] Teardown timeout reached; forcing stop" << std::endl;
+        stop_requested_.store(true, std::memory_order_release);
+        continue;
+      }
+
+      if (output_buffer_.IsEmpty()) {
+        std::cout << "[FrameProducer] Buffer drained; completing teardown" << std::endl;
+        stop_requested_.store(true, std::memory_order_release);
+        continue;
+      }
+
+      WaitForMicros(master_clock_, 1'000);
+      continue;
+    }
+
     if (config_.stub_mode) {
       if (master_clock_ && next_stub_deadline_utc_ == 0) {
         next_stub_deadline_utc_ = master_clock_->now_utc_us();

@@ -46,3 +46,4 @@ cmake --build build --target timing_soak
 - `masterclock_jitter_ms_p95` stays correlated with frame gap. Sustained values above `5 ms` signal upstream clock noise; rerun the integration test with fresh TestMasterClock seeds to confirm reproducibility.
 - Prometheus scrapes combine the MasterClock and Renderer samples illustrated in `docs/runtime/PlayoutRuntime.md`. Confirm scrape freshness before drawing conclusions from any single snapshot.
 
+

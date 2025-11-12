@@ -45,6 +45,7 @@ Execute sequentially: `Pause`, `Resume`, `Seek` (forward 5 s), `Stop`, recording
 - `playout_control_resume_latency_ms` p95 ≤ 50 ms; first frame post-resume aligns with scheduled deadline.
 - Seek completes (`Playing` → `Buffering` → `Playing`) in ≤ 250 ms end-to-end; resume latency logged.
 - `playout_control_stop_duration_ms` ≤ 500 ms; final state `Idle`.
+- Teardown initiated via `RequestTeardown` drains producer within the configured timeout and logs `playout_control_teardown_duration_ms`.
 
 **Failure Semantics**  
 Breaching any threshold triggers `playout_control_latency_violation_total` and escalates channel to `Error` with requirement for manual `Recover`.
@@ -59,6 +60,7 @@ Channel in `Playing`. Dedup window configured for 60 s. Metrics exporter watchin
 
 **Stimulus**  
 Send duplicate `Seek` command with same `command_id` within 5 s, then simulate external control timeout (> SLA) and command queue overflow (flood of commands).
+- Additionally, trigger a `RequestTeardown` to confirm deduplication and latency metrics remain consistent.
 
 **Assertions**
 

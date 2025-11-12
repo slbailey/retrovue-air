@@ -7,6 +7,7 @@
 #define RETROVUE_DECODE_FRAME_PRODUCER_H_
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
@@ -81,6 +82,12 @@ class FrameProducer {
   // Blocks until the thread exits.
   void Stop();
 
+  // Initiates a graceful teardown with bounded drain timeout.
+  void RequestTeardown(std::chrono::milliseconds drain_timeout);
+
+  // Forces the producer to stop immediately (used when teardown times out).
+  void ForceStop();
+
   // Returns true if the producer is currently running.
   bool IsRunning() const { return running_.load(std::memory_order_acquire); }
 
@@ -115,6 +122,10 @@ class FrameProducer {
   std::unique_ptr<std::thread> producer_thread_;
   std::unique_ptr<FFmpegDecoder> decoder_;
   std::shared_ptr<timing::MasterClock> master_clock_;
+
+  std::atomic<bool> teardown_requested_;
+  std::chrono::steady_clock::time_point teardown_deadline_;
+  std::chrono::milliseconds drain_timeout_;
   
   // State for stub frame generation
   int64_t stub_pts_counter_;

@@ -6,6 +6,7 @@
 #include "playout_service.h"
 
 #include <iostream>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -91,8 +92,15 @@ namespace retrovue
         {
           worker->orchestration_loop->Stop();
         }
+        if (worker->teardown_thread_active.load(std::memory_order_acquire) &&
+            worker->teardown_thread.joinable())
+        {
+          worker->teardown_thread.join();
+        }
+        worker->teardown_thread_active.store(false, std::memory_order_release);
         if (worker->producer)
         {
+          worker->producer->ForceStop();
           worker->producer->Stop();
         }
         if (metrics_exporter_)
@@ -519,25 +527,159 @@ namespace retrovue
                                                  const StopChannelRequest *request,
                                                  StopChannelResponse *response)
     {
-      std::lock_guard<std::mutex> lock(channels_mutex_);
-
       const int32_t channel_id = request->channel_id();
       const int64_t request_time = NowUtc(master_clock_);
-
       std::cout << "[StopChannel] Request received: channel_id=" << channel_id << std::endl;
+      return StopChannelShared(channel_id, response, request_time, /*forced_teardown=*/false);
+    }
 
-      // Check if channel is active
+    grpc::Status PlayoutControlImpl::GetVersion(grpc::ServerContext *context,
+                                                const ApiVersionRequest *request,
+                                                ApiVersion *response)
+    {
+      std::cout << "[GetVersion] Request received" << std::endl;
+
+      response->set_version(kApiVersion);
+
+      std::cout << "[GetVersion] Returning version: " << kApiVersion << std::endl;
+      return grpc::Status::OK;
+    }
+
+    void PlayoutControlImpl::RequestTeardown(int32_t channel_id, const std::string& reason)
+    {
+      std::lock_guard<std::mutex> lock(channels_mutex_);
+
       auto it = active_channels_.find(channel_id);
       if (it == active_channels_.end())
       {
-        response->set_success(false);
-        response->set_message("Channel not found");
+        std::cerr << "[PlayoutControlImpl] Teardown requested for unknown channel "
+                  << channel_id << std::endl;
+        return;
+      }
+
+      auto& worker = it->second;
+      if (worker->teardown_requested.exchange(true))
+      {
+        std::cout << "[PlayoutControlImpl] Teardown already in flight for channel "
+                  << channel_id << std::endl;
+        return;
+      }
+
+      worker->teardown_reason = reason;
+      worker->teardown_started = std::chrono::steady_clock::now();
+      std::cout << "[PlayoutControlImpl] Channel " << channel_id
+                << " teardown requested: " << reason << std::endl;
+
+      if (worker->producer)
+      {
+        worker->producer->RequestTeardown(worker->teardown_timeout);
+      }
+
+      worker->teardown_thread_active.store(true, std::memory_order_release);
+      worker->teardown_thread = std::thread(&PlayoutControlImpl::MonitorTeardown, this, channel_id);
+    }
+
+    void PlayoutControlImpl::MonitorTeardown(int32_t channel_id)
+    {
+      while (true)
+      {
+        bool finalize = false;
+        bool forced = false;
+        {
+          std::lock_guard<std::mutex> lock(channels_mutex_);
+          auto it = active_channels_.find(channel_id);
+          if (it == active_channels_.end())
+          {
+            return;
+          }
+
+          auto& worker = it->second;
+          if (!worker->teardown_requested.load())
+          {
+            return;
+          }
+
+          const auto now = std::chrono::steady_clock::now();
+          if (!worker->producer || !worker->producer->IsRunning())
+          {
+            finalize = true;
+          }
+          else if (now - worker->teardown_started > worker->teardown_timeout)
+          {
+            std::cerr << "[PlayoutControlImpl] Channel " << channel_id
+                      << " teardown exceeded timeout; forcing producer stop" << std::endl;
+            forced = true;
+            worker->producer->ForceStop();
+            finalize = true;
+          }
+        }
+
+        if (finalize)
+        {
+          FinalizeTeardown(channel_id, forced);
+          return;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    }
+
+    void PlayoutControlImpl::FinalizeTeardown(int32_t channel_id, bool forced)
+    {
+      StopChannelResponse ignored;
+      auto status = StopChannelShared(channel_id, &ignored, std::nullopt, forced);
+      if (!status.ok())
+      {
+        std::cerr << "[PlayoutControlImpl] FinalizeTeardown failed for channel "
+                  << channel_id << ": " << status.error_message() << std::endl;
+      }
+    }
+
+    grpc::Status PlayoutControlImpl::StopChannelShared(int32_t channel_id,
+                                                       StopChannelResponse* response,
+                                                       const std::optional<int64_t>& request_time,
+                                                       bool forced_teardown)
+    {
+      std::lock_guard<std::mutex> lock(channels_mutex_);
+      return StopChannelLocked(channel_id, response, request_time, forced_teardown);
+    }
+
+    grpc::Status PlayoutControlImpl::StopChannelLocked(int32_t channel_id,
+                                                       StopChannelResponse* response,
+                                                       const std::optional<int64_t>& request_time,
+                                                       bool forced_teardown)
+    {
+      auto it = active_channels_.find(channel_id);
+      if (it == active_channels_.end())
+      {
+        if (response)
+        {
+          response->set_success(false);
+          response->set_message("Channel not found");
+        }
         return grpc::Status(grpc::StatusCode::NOT_FOUND, "Channel is not running");
       }
 
-      auto &worker = it->second;
+      auto& worker = it->second;
 
-      // Stop renderer first (consumer)
+      if (worker->teardown_thread_active.load(std::memory_order_acquire) &&
+          worker->teardown_thread.joinable())
+      {
+        if (worker->teardown_thread.get_id() == std::this_thread::get_id())
+        {
+          worker->teardown_thread.detach();
+        }
+        else
+        {
+          worker->teardown_thread.join();
+        }
+      }
+      worker->teardown_thread_active.store(false, std::memory_order_release);
+      if (worker->teardown_thread.joinable())
+      {
+        worker->teardown_thread = std::thread();
+      }
+
       if (worker->renderer)
       {
         std::cout << "[StopChannel] Stopping renderer for channel " << channel_id << std::endl;
@@ -550,9 +692,12 @@ namespace retrovue
         worker->orchestration_loop.reset();
       }
 
-      // Stop frame producer (producer)
       if (worker->producer)
       {
+        if (forced_teardown)
+        {
+          worker->producer->ForceStop();
+        }
         std::cout << "[StopChannel] Stopping producer for channel " << channel_id << std::endl;
         worker->producer->Stop();
       }
@@ -560,10 +705,22 @@ namespace retrovue
       if (worker->control)
       {
         const int64_t effective_time = NowUtc(master_clock_);
-        worker->control->Stop(MakeCommandId("stop", channel_id), request_time, effective_time);
+        const int64_t request_utc = request_time.value_or(effective_time);
+        worker->control->Stop(MakeCommandId("stop", channel_id), request_utc, effective_time);
       }
 
-      // Update metrics to stopped state
+      if (worker->teardown_requested.load())
+      {
+        const auto duration = std::chrono::steady_clock::now() - worker->teardown_started;
+        const auto duration_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+        std::cout << "[PlayoutControlImpl] Channel " << channel_id
+                  << " teardown duration: " << duration_ms << " ms"
+                  << " (forced=" << std::boolalpha << forced_teardown
+                  << ", reason=\"" << worker->teardown_reason << "\")" << std::endl;
+        worker->teardown_requested.store(false);
+      }
+
       if (metrics_exporter_)
       {
         telemetry::ChannelMetrics metrics;
@@ -573,30 +730,21 @@ namespace retrovue
         metrics.decode_failure_count = 0;
         metrics.corrections_total = 0;
         metrics_exporter_->SubmitChannelMetrics(channel_id, metrics);
-
-        // Remove from metrics after a brief delay (handled externally)
         metrics_exporter_->SubmitChannelRemoval(channel_id);
       }
 
-      // Remove worker (RAII cleanup handles buffer/producer destruction)
       active_channels_.erase(it);
 
-      response->set_success(true);
-      response->set_message("Channel stopped and resources released");
+      if (response)
+      {
+        response->set_success(true);
+        response->set_message(forced_teardown
+                                  ? "Channel stopped (teardown forced after timeout)"
+                                  : "Channel stopped and resources released");
+      }
 
-      std::cout << "[StopChannel] Channel " << channel_id << " stopped successfully" << std::endl;
-      return grpc::Status::OK;
-    }
-
-    grpc::Status PlayoutControlImpl::GetVersion(grpc::ServerContext *context,
-                                                const ApiVersionRequest *request,
-                                                ApiVersion *response)
-    {
-      std::cout << "[GetVersion] Request received" << std::endl;
-
-      response->set_version(kApiVersion);
-
-      std::cout << "[GetVersion] Returning version: " << kApiVersion << std::endl;
+      std::cout << "[StopChannel] Channel " << channel_id << " stopped successfully"
+                << (forced_teardown ? " [forced]" : "") << std::endl;
       return grpc::Status::OK;
     }
 

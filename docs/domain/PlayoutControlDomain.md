@@ -79,6 +79,10 @@ Define the real-time session control responsibilities for channel playout, inclu
   - Preconditions: current state `Error`.
   - Effects: resets command queue, revalidates schedule, returns to `Buffering`.
   - Postconditions: `playout_control_recover_total` incremented; idempotent within recovery window.
+- `RequestTeardown(channel_id, reason)`
+  - Preconditions: viewer count reaches 0 while channel is `Playing` or `Paused`.
+  - Effects: initiates producer drain, keeps PaceController ticks active, records teardown start time.
+  - Postconditions: `playout_control_teardown_duration_ms` logged once producer signals stopped; if timeout exceeded, escalates to forced stop and increments `playout_control_latency_violation_total`.
 - `GetState(channel_id)` – Returns current control state with timestamps for auditing; side-effect free.
 
 ## Guarantees
@@ -111,6 +115,10 @@ Define the real-time session control responsibilities for channel playout, inclu
   - Detection: disallowed state change requested.
   - Metric: `playout_control_illegal_transition_total` with labels `{from,to}`.
   - Escalation: command rejected; state unchanged.
+- **Teardown timeout**
+  - Detection: producer fails to drain within configured teardown window.
+  - Metric/Alert: increments `playout_control_latency_violation_total` and logs forced stop event.
+  - Escalation: controller enters `Error` and forces producer shutdown; ChannelManager receives warning for manual follow-up.
 
 ## See also
 

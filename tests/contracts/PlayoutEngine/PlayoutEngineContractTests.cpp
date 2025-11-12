@@ -204,6 +204,30 @@ TEST_F(PlayoutEngineContractTest, BC_002_BufferDepthRemainsWithinCapacity)
   manager.StopChannel(runtime, exporter);
 }
 
+// Rule: BC-007 Graceful Teardown Handshake (Phase 5d)
+TEST_F(PlayoutEngineContractTest, BC_007_TeardownHandshakeDrainsProducer)
+{
+  telemetry::MetricsExporter exporter(/*port=*/0);
+  ChannelManagerStub manager;
+
+  decode::ProducerConfig config;
+  config.stub_mode = true;
+  config.asset_uri = "contract://playout/teardown";
+  config.target_fps = 30.0;
+
+  auto runtime = manager.StartChannel(230, config, exporter, /*buffer_capacity=*/8);
+  std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+  manager.RequestTeardown(runtime, exporter, "viewer_count_zero");
+
+  ASSERT_TRUE(runtime.buffer);
+  EXPECT_TRUE(runtime.buffer->IsEmpty());
+
+  telemetry::ChannelMetrics metrics{};
+  EXPECT_FALSE(exporter.GetChannelMetrics(230, metrics))
+      << "Teardown should remove channel metrics to avoid stale active state";
+}
+
 // Rule: BC-006 Monotonic PTS (PlayoutEngineDomain.md §BC-006)
 TEST_F(PlayoutEngineContractTest, BC_006_FramePtsRemainMonotonic)
 {
