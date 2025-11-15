@@ -1203,1004 +1203,170 @@ The sink runs its own worker thread with a continuous timing loop that checks Ma
 
 ---
 
-## 6. Timing & Synchronization (MANDATORY)
-
-**This is the #1 source of bugs in playout systems. This section is the "law."**
-
-### 6.1. The Sink Owns the Timing Loop
-
-**CRITICAL RULE**: The MpegTSPlayoutSink owns the timing loop.
-
-The sink runs its own worker thread that:
-- ✅ Continuously compares the current MasterClock time against the next frame's PTS
-- ✅ Independently pulls the next decoded frame from the FrameBuffer when MasterClock indicates that the frame's presentation timestamp (PTS) is due
-- ✅ When the PTS is due (or slightly overdue), pops the frame from the FrameBuffer, encodes/muxes it, and emits it into the MPEG-TS transport stream
-
-**The sink does NOT**:
-- ❌ Wait for external calls or callbacks
-- ❌ Guess frame rate
-- ❌ Determine timing independently (uses MasterClock as reference)
-
-### 6.2. How Frames Are Selected
-
-The sink's timing loop continuously:
-
-**Frame Selection Logic**:
-1. **Query MasterClock** for current time: `master_time_us = master_clock_->now_utc_us()`
-2. **Peek next frame PTS from buffer** (non-destructive read)
-3. **Compare frame PTS with master time**:
-   - If `frame.pts_us <= master_time_us` → **Output it** (frame is on time or late)
-   - If `frame.pts_us > master_time_us` → **Wait** (frame is early, check again in next loop iteration)
-   - If buffer is empty → **Apply underflow policy** (see Buffer Underflow)
-
-**Implementation**:
-```cpp
-void MpegTSPlayoutSink::WorkerLoop() {
-    while (!stop_requested_) {
-        if (!is_running_ || !client_connected_) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
-        }
-        
-        // Query MasterClock for current time
-        int64_t master_time_us = master_clock_->now_utc_us();
-        
-        // Peek next frame (non-destructive)
-        DecodedFrame* next_frame = buffer_.Peek();
-        
-        if (!next_frame) {
-            // Buffer empty - apply underflow policy
-            HandleBufferUnderflow(master_time_us);
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
-        }
-        
-        // Compare frame PTS with master time
-        if (next_frame->pts_us <= master_time_us) {
-            // Frame PTS is due (or overdue) - pop and output
-            DecodedFrame frame;
-            buffer_.Pop(frame);  // Remove from buffer
-            
-            // Handle buffer overflow (drop any other late frames)
-            HandleBufferOverflow(master_time_us);
-            
-            // Encode and send frame
-            EncodeAndSendFrame(frame, master_time_us);
-        } else {
-            // Frame is early - calculate wait time
-            int64_t wait_us = next_frame->pts_us - master_time_us;
-            
-            // If more than 5ms early, sleep to avoid busy-waiting
-            if (wait_us > 5000) {
-                std::this_thread::sleep_for(std::chrono::microseconds(wait_us / 2));
-            }
-            // Otherwise, continue loop (small sleep at end)
-        }
-        
-        // Small sleep to avoid 100% CPU (1ms)
-        std::this_thread::sleep_for(std::chrono::microseconds(1000));
-    }
-}
-```
-
-**Key Points**:
-- Sink owns the timing loop (runs in worker thread)
-- Sink continuously queries MasterClock and compares with frame PTS
-- Sink independently decides when to pull and output frames
-- Frame selection is based on PTS comparison with MasterClock time
-
-### 6.3. Timing Loop Implementation
-
-The sink's worker thread runs a continuous loop that:
-
-1. **Queries MasterClock**: `master_time_us = master_clock_->now_utc_us()`
-2. **Peeks next frame**: `next_frame = buffer_.Peek()`
-3. **Compares PTS**: If `next_frame->pts_us <= master_time_us`, frame is due
-4. **Outputs frame**: Pop frame, encode, mux, send
-5. **Sleeps briefly**: Small sleep (1ms) to avoid busy-waiting, then repeat
-
-**Loop Structure**:
-```cpp
-void MpegTSPlayoutSink::WorkerLoop() {
-    while (!stop_requested_) {
-        if (!is_running_ || !client_connected_) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
-        }
-        
-        // Query MasterClock
-        int64_t master_time_us = master_clock_->now_utc_us();
-        
-        // Peek next frame
-        DecodedFrame* next_frame = buffer_.Peek();
-        
-        if (!next_frame) {
-            HandleBufferUnderflow(master_time_us);
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
-        }
-        
-        // Compare frame PTS with master time
-        if (next_frame->pts_us <= master_time_us) {
-            // Frame is due - pop and output
-            DecodedFrame frame;
-            buffer_.Pop(frame);
-            HandleBufferOverflow(master_time_us);  // Drop any other late frames
-            EncodeAndSendFrame(frame, master_time_us);
-        } else {
-            // Frame is early - calculate wait time
-            int64_t wait_us = next_frame->pts_us - master_time_us;
-            if (wait_us > 5000) {  // > 5ms
-                std::this_thread::sleep_for(std::chrono::microseconds(wait_us / 2));
-            }
-        }
-        
-        // Small sleep to avoid 100% CPU
-        std::this_thread::sleep_for(std::chrono::microseconds(1000));
-    }
-}
-```
-
-### 6.4. Timing Policies
-
-**Required behaviors** for buffer conditions:
-
-#### BUFFER UNDERFLOW (Producer too slow)
-
-When buffer is empty in the timing loop, the sink must choose one of these policies:
-
-**FRAME_FREEZE (default)**: Repeat last frame
-- Output the last successfully encoded frame again
-- Maintains visual continuity (no black screen)
-- Client sees frozen frame until new frame arrives
-- **Implementation**: Store last encoded frame, send it again
-
-**BLACK_FRAME**: Output synthetic black frame
-- Generate a black YUV420P frame
-- Encode and send black frame
-- Client sees black screen until new frame arrives
-- **Implementation**: Pre-allocate black frame, encode and send
-
-**SKIP**: Do nothing (may cause stutter)
-- Do not output anything
-- Client may see stutter or freeze
-- **Use case**: When frame freeze is not desired
-
-**Policy Selection**:
-```cpp
-enum class UnderflowPolicy {
-    FRAME_FREEZE,  // Default
-    BLACK_FRAME,
-    SKIP
-};
-
-void HandleBufferUnderflow(int64_t master_time_us) {
-    switch (underflow_policy_) {
-        case UnderflowPolicy::FRAME_FREEZE:
-            if (last_encoded_frame_) {
-                SendEncodedFrame(last_encoded_frame_, master_pts_us);
-            }
-            break;
-        case UnderflowPolicy::BLACK_FRAME:
-            EncodeAndSendBlackFrame(master_pts_us);
-            break;
-        case UnderflowPolicy::SKIP:
-            // Do nothing
-            break;
-    }
-    EmitEvent(SinkEvent::BUFFER_UNDERFLOW);
-}
-```
-
-#### BUFFER OVERFLOW (Producer too fast)
-
-When buffer has frames older than `master_pts_us` (late frames):
-
-**Always**:
-- Discard frames older than `master_pts_us` (late frames)
-- **NEVER BLOCK** - drop frames immediately
-- Continue to next frame that is on time or early
-
-**Implementation**:
-```cpp
-void HandleBufferOverflow(int64_t master_time_us) {
-    int dropped_count = 0;
-    
-    // Drop all late frames
-    while (true) {
-        DecodedFrame* next_frame = buffer_.Peek();
-        if (!next_frame) break;
-        
-        if (next_frame->pts_us < master_pts_us) {
-            // Frame is late - drop it
-            DecodedFrame frame;
-            buffer_.Pop(frame);
-            dropped_count++;
-            frames_dropped_++;
-        } else {
-            // Found frame that is on time or early - stop dropping
-            break;
-        }
-    }
-    
-    if (dropped_count > 0) {
-        EmitEvent(SinkEvent::BUFFER_OVERFLOW, dropped_count);
-    }
-}
-```
-
-**Key Rules**:
-- **NEVER BLOCK** waiting for buffer space
-- **ALWAYS DROP** late frames immediately
-- Continue processing on-time frames
-- Log overflow events for monitoring
-
-### Timing Decision Logic
-
-```cpp
-int64_t frame_pts = frame.metadata.pts;
-int64_t deadline_utc = master_clock_->scheduled_to_utc_us(frame_pts);
-int64_t now_utc = master_clock_->now_utc_us();
-int64_t gap_us = deadline_utc - now_utc;
-
-if (gap_us > kWaitThresholdUs) {
-    // Ahead of schedule: sleep until deadline
-    WaitUntilUtc(master_clock_, deadline_utc - kWaitFudgeUs);
-} else if (gap_us < -kLateThresholdUs) {
-    // Behind schedule: drop frame
-    frames_dropped_++;
-    late_frames_++;
-    return;  // Skip this frame
-} else {
-    // On schedule: output immediately
-    EncodeAndSendFrame(frame);
-}
-```
-
-**Thresholds**:
-- `kWaitThresholdUs`: 1ms (sleep if more than 1ms ahead)
-- `kLateThresholdUs`: 33ms (drop if more than 33ms late at 30fps)
-- `kWaitFudgeUs`: 500µs (wake up slightly before deadline)
-
-### Ahead of Schedule Handling
-
-**When ahead of schedule** (frame deadline is in the future):
-- Sink sleeps until deadline using `WaitUntilUtc()`
-- Sink may use spin-wait for fine-grained timing (< 1ms)
-- Sink maintains real-time output pacing
-- **No frame drops**: All frames are output on time
-
-**Implementation**:
-```cpp
-if (gap_us > kWaitThresholdUs) {
-    int64_t target_utc = deadline_utc - kWaitFudgeUs;
-    WaitUntilUtc(master_clock_, target_utc);
-    
-    // Fine-grained spin-wait
-    while (master_clock_->now_utc_us() < deadline_utc) {
-        int64_t remaining_us = deadline_utc - master_clock_->now_utc_us();
-        if (remaining_us > kSpinThresholdUs) {
-            WaitForMicros(master_clock_, remaining_us / 2);
-        }
-    }
-}
-```
-
-### Behind Schedule Handling
-
-**When behind schedule** (frame deadline is in the past):
-- Sink implements **resync policy**: drop late frames
-- Sink increments `frames_dropped_` and `late_frames_` counters
-- Sink continues to next frame (attempts to catch up)
-- Sink maintains real-time output (no buffering of late frames)
-
-**Resync Policy**:
-1. If frame is more than `kLateThresholdUs` late: drop frame
-2. If buffer has sufficient depth (> 10 frames): drop late frames to catch up
-3. If buffer is shallow (< 10 frames): output frame anyway (prevent underrun)
-4. Track late frame events for monitoring
-
-**Implementation**:
-```cpp
-if (gap_us < -kLateThresholdUs) {
-    if (buffer_.Size() > kMinDepthForDrop) {
-        frames_dropped_++;
-        late_frames_++;
-        return;  // Drop late frame
-    } else {
-        // Buffer too shallow: output anyway to prevent underrun
-        EncodeAndSendFrame(frame);
-    }
-}
-```
-
-### Clock Synchronization
-
-**MasterClock Alignment**:
-- Sink queries MasterClock before each frame output
-- Sink aligns frame output to MasterClock deadlines
-- Sink maintains drift bounds (< 1ms for broadcast quality)
-- Sink reports timing metrics for monitoring
-
-**Drift Detection**:
-- Sink tracks `frame_gap_ms` for each frame
-- Sink logs warnings if drift exceeds threshold
-- Sink reports drift via statistics interface
-
-### Explicit Timing Requirements
-
-This section must be extremely explicit so Cursor will implement correct behavior:
-
-1. **Sink MUST query MasterClock before outputting each frame**
-2. **Sink MUST sleep when ahead of schedule** (use `WaitUntilUtc()` or `WaitForMicros()`)
-3. **Sink MUST drop frames when behind schedule** (more than `kLateThresholdUs` late)
-4. **Sink MUST maintain real-time output** (no buffering of late frames)
-5. **Sink MUST track late frame events** (increment `late_frames_` counter)
-6. **Sink MUST report timing statistics** (frames_dropped, late_frames, frame_gap_ms)
-
----
-
-## 6.1. Timing & Pacing Specification
-
-This section defines the precise timing thresholds, policies, and behaviors that ensure deterministic broadcast output.
-
-### MasterClock Tolerance
-
-**Tolerance**: ±5ms
-
-The sink must maintain frame output timing within ±5ms of MasterClock deadlines. This tolerance ensures:
-- Broadcast synchronization across multiple channels
-- Acceptable jitter for downstream equipment
-- Compliance with broadcast timing standards
-
-**Implementation**:
-- Sink calculates `deadline_utc = master_clock_->scheduled_to_utc_us(frame.metadata.pts)`
-- Sink calculates `now_utc = master_clock_->now_utc_us()`
-- Sink calculates `gap_us = deadline_utc - now_utc`
-- If `abs(gap_us) > 5000` (5ms): Sink logs timing violation warning
-
-### Render Deadline Calculation
-
-**Formula**: `render_deadline_utc = scheduled_utc + tolerance`
-
-Where:
-- `scheduled_utc = master_clock_->scheduled_to_utc_us(frame.metadata.pts)`
-- `tolerance = 5000` microseconds (5ms)
-
-**Behavior**:
-- Sink MUST output frame before `render_deadline_utc`
-- If `now_utc < render_deadline_utc - kWaitThresholdUs`: Sink sleeps until deadline
-- If `now_utc >= render_deadline_utc`: Sink outputs frame immediately (or drops if late)
-
-### Late Frame Threshold
-
-**Threshold**: 33ms (1 frame at 30fps)
-
-Frames that are more than 33ms late are considered **late frames** and subject to drop policy.
-
-**Constants**:
-```cpp
-constexpr int64_t kLateThresholdUs = 33'000;  // 33ms at 30fps
-constexpr int64_t kHardDesyncThresholdUs = 100'000;  // 100ms hard desync
-```
-
-**Detection**:
-- If `gap_us < -kLateThresholdUs`: Frame is late
-- If `gap_us < -kHardDesyncThresholdUs`: Hard desync event (log critical warning)
-
-### Drop Policy
-
-**Rule**: Drop late frames when behind schedule to maintain real-time output.
-
-**Conditions**:
-1. **Frame is late**: `gap_us < -kLateThresholdUs` (33ms)
-2. **Buffer has depth**: `buffer.Size() > kMinDepthForDrop` (10 frames)
-3. **Not in catch-up mode**: Sink is not actively catching up from previous desync
-
-**Actions**:
-- Drop frame (do not encode or send)
-- Increment `frames_dropped_` counter
-- Increment `late_frames_` counter
-- Continue to next frame (attempt catch-up)
-
-**Exception**:
-- If `buffer.Size() <= kMinDepthForDrop`: Output frame anyway to prevent buffer underrun
-- This prevents cascading failures when buffer is shallow
-
-**Implementation**:
-```cpp
-if (gap_us < -kLateThresholdUs) {
-    if (buffer_.Size() > kMinDepthForDrop && !catch_up_mode_) {
-        frames_dropped_++;
-        late_frames_++;
-        return;  // Drop late frame
-    } else {
-        // Buffer too shallow or catch-up mode: output anyway
-        EncodeAndSendFrame(frame);
-    }
-}
-```
-
-### Catch-Up Policy
-
-**Rule**: When behind schedule, sink must aggressively catch up by dropping multiple late frames.
-
-**Trigger**:
-- Sink detects it is behind schedule (`gap_us < -kLateThresholdUs`)
-- Buffer depth is sufficient (`buffer.Size() > kMinDepthForDrop`)
-
-**Behavior**:
-1. Enter catch-up mode: `catch_up_mode_ = true`
-2. Drop all frames until current frame is within tolerance
-3. Calculate catch-up target: `target_gap_us = -kLateThresholdUs / 2` (16.5ms early)
-4. Continue dropping frames until `gap_us >= target_gap_us`
-5. Exit catch-up mode: `catch_up_mode_ = false`
-6. Resume normal operation
-
-**Limits**:
-- Maximum catch-up duration: 500ms
-- Maximum frames dropped in catch-up: 15 frames (0.5s at 30fps)
-- If catch-up exceeds limits: Log hard desync event and reset encoder
-
-**Implementation**:
-```cpp
-if (gap_us < -kLateThresholdUs && buffer_.Size() > kMinDepthForDrop) {
-    catch_up_mode_ = true;
-    catch_up_start_utc_ = now_utc;
-    catch_up_frames_dropped_ = 0;
-    
-    while (gap_us < -kLateThresholdUs / 2 && 
-           (now_utc - catch_up_start_utc_) < 500'000 &&  // 500ms max
-           catch_up_frames_dropped_ < 15) {  // 15 frames max
-        if (!buffer_.Pop(frame)) break;
-        frames_dropped_++;
-        catch_up_frames_dropped_++;
-        // Recalculate gap for next frame
-        gap_us = CalculateGapForNextFrame();
-    }
-    
-    catch_up_mode_ = false;
-}
-```
-
-### Hard Desync Threshold
-
-**Threshold**: 100ms
-
-When sink is more than 100ms behind schedule, this is considered a **hard desync** event requiring immediate action.
-
-**Detection**:
-- If `gap_us < -kHardDesyncThresholdUs` (100ms): Hard desync detected
-
-**Actions**:
-1. Log critical warning: `"[MpegTSPlayoutSink] Hard desync detected: <gap_ms>ms behind schedule"`
-2. Reset encoder state (force IDR frame on next encode)
-3. Drop all frames until within tolerance
-4. Emit desync event to metrics system
-5. If desync persists > 1 second: Enter fault state (see Fault/Recovery State Machine)
-
-**Implementation**:
-```cpp
-if (gap_us < -kHardDesyncThresholdUs) {
-    LogCritical("Hard desync: %ld ms behind schedule", -gap_us / 1000);
-    ResetEncoderState();  // Force IDR on next frame
-    desync_events_++;
-    
-    // Drop frames until within tolerance
-    while (gap_us < -kLateThresholdUs && buffer_.Size() > kMinDepthForDrop) {
-        Frame frame;
-        if (!buffer_.Pop(frame)) break;
-        frames_dropped_++;
-        gap_us = CalculateGapForNextFrame();
-    }
-    
-    if (desync_duration_ > 1'000'000) {  // 1 second
-        EnterFaultState(SinkFault::HARD_DESYNC);
-    }
-}
-```
-
-### Behavior for Empty Buffer
-
-**Rule**: Sink must wait for frames when buffer is empty, never crash or block producer.
-
-**Conditions**:
-- `FrameRingBuffer->Pop()` returns `false` (buffer empty)
-
-**Actions**:
-1. Increment `buffer_empty_count_` statistic
-2. Wait `kSinkWaitUs` (10ms) using `WaitForMicros(master_clock_, kSinkWaitUs)`
-3. Retry pop on next iteration
-4. Never block or crash
-
-**Limits**:
-- Maximum consecutive empty buffer events: 100 (1 second at 10ms intervals)
-- If buffer remains empty > 1 second: Log warning and enter buffering state
-- If buffer remains empty > 5 seconds: Enter fault state (see Fault/Recovery State Machine)
-
-**Implementation**:
-```cpp
-if (!buffer_.Pop(frame)) {
-    buffer_empty_count_++;
-    consecutive_empty_count_++;
-    
-    if (consecutive_empty_count_ > 100) {  // 1 second
-        LogWarning("Buffer empty for > 1 second");
-        if (consecutive_empty_count_ > 500) {  // 5 seconds
-            EnterFaultState(SinkFault::BUFFER_STARVATION);
-        }
-    }
-    
-    WaitForMicros(master_clock_, kSinkWaitUs);  // 10ms
-    return;  // Retry on next iteration
-}
-consecutive_empty_count_ = 0;  // Reset on successful pop
-```
-
-### Behavior for Full Buffer
-
-**Rule**: Sink must never block producer when buffer is full. Producer handles backpressure.
-
-**Note**: This is a **producer responsibility**, not a sink responsibility. However, sink behavior affects buffer fullness:
-
-**Sink Impact on Buffer Fullness**:
-- If sink is slow (encoding takes too long): Buffer fills up
-- If sink drops frames: Buffer may fill up (producer continues producing)
-- If sink is ahead of schedule: Buffer may fill up (sink sleeps, producer continues)
-
-**Sink Behavior**:
-- Sink does NOT monitor buffer fullness
-- Sink does NOT signal producer to slow down
-- Sink only pops frames when ready to encode
-- Producer handles backpressure independently (see VideoFileProducerDomain.md)
-
-**Exception**:
-- If sink detects buffer is consistently full (> 50 frames for > 5 seconds): Log warning
-- This indicates sink is too slow relative to producer
-
----
-
-## 6.2. Fault/Recovery State Machine
-
-The sink implements an explicit fault/recovery state machine to handle encoding errors, network failures, and desync events. This ensures deterministic behavior and graceful degradation.
-
-### State Definitions
-
-```cpp
-enum class SinkState {
-    STOPPED,          // Initial state, sink not running
-    RUNNING,          // Normal operation, encoding and streaming
-    ENCODER_FAULT,    // Encoder subsystem failure
-    OUTPUT_RETRY,     // Network output failure, retrying
-    OUTPUT_FAULT,     // Network output failure, unrecoverable
-    BUFFER_STARVATION,// Buffer empty for extended period
-    HARD_DESYNC       // Hard desync event, requires reset
-};
-```
-
-### State Transition Diagram
-
-```
-STOPPED
-   ↓ (Start())
-RUNNING
-   ↓ (encode error > N times)
-ENCODER_FAULT
-   ↓ (reset succeeds)
-RUNNING
-   ↓ (output socket failure)
-OUTPUT_RETRY
-   ↓ (retry succeeds)
-RUNNING
-   ↓ (retry fails > M times)
-OUTPUT_FAULT
-   ↓ (manual reset)
-STOPPED
-   ↓ (Start())
-RUNNING
-   ↓ (buffer empty > 5s)
-BUFFER_STARVATION
-   ↓ (buffer has frames)
-RUNNING
-   ↓ (hard desync > 1s)
-HARD_DESYNC
-   ↓ (reset encoder)
-RUNNING
-```
-
-### State Transitions
-
-#### STOPPED → RUNNING
-
-**Trigger**: `Start()` called
-
-**Actions**:
-1. Initialize encoder subsystem
-2. Open network output socket
-3. Start sink thread
-4. Transition to `RUNNING`
-
-**Failure Handling**:
-- If encoder initialization fails: Fall back to stub mode, transition to `RUNNING`
-- If network socket fails: Transition to `OUTPUT_RETRY`
-
-#### RUNNING → ENCODER_FAULT
-
-**Trigger**: Encoder error count exceeds threshold
-
-**Conditions**:
-- `encoding_errors_ > kMaxEncoderErrors` (default: 10 errors in 1 second)
-- Encoder reports fatal error (codec failure, memory error)
-
-**Actions**:
-1. Log error: `"[MpegTSPlayoutSink] Encoder fault: <error_count> errors"`
-2. Stop encoding (drop frames)
-3. Transition to `ENCODER_FAULT`
-4. Emit fault event to metrics system
-
-**Recovery Attempts**:
-- Every 5 seconds: Attempt encoder reset
-- If reset succeeds: Transition to `RUNNING`
-- If reset fails after 30 seconds: Log critical error, remain in `ENCODER_FAULT`
-
-**Implementation**:
-```cpp
-if (encoding_errors_ > kMaxEncoderErrors) {
-    LogError("Encoder fault: %lu errors", encoding_errors_);
-    state_ = SinkState::ENCODER_FAULT;
-    last_fault_time_ = now_utc;
-    EmitFaultEvent(SinkFault::ENCODER_FAULT);
-}
-
-// Recovery attempt
-if (state_ == SinkState::ENCODER_FAULT) {
-    if ((now_utc - last_fault_time_) > 5'000'000) {  // 5 seconds
-        if (ResetEncoder()) {
-            state_ = SinkState::RUNNING;
-            encoding_errors_ = 0;
-        } else if ((now_utc - last_fault_time_) > 30'000'000) {  // 30 seconds
-            LogCritical("Encoder reset failed after 30 seconds");
-        }
-    }
-}
-```
-
-#### RUNNING → OUTPUT_RETRY
-
-**Trigger**: Network output failure
-
-**Conditions**:
-- `sendto()` or HTTP POST fails (network error)
-- `network_errors_ > 0`
-
-**Actions**:
-1. Log warning: `"[MpegTSPlayoutSink] Output retry: <error_count> errors"`
-2. Close and reopen network socket
-3. Transition to `OUTPUT_RETRY`
-4. Continue encoding (buffer encoded frames)
-
-**Retry Policy**:
-- Retry every 1 second
-- Maximum retries: 10 attempts
-- If retry succeeds: Transition to `RUNNING`
-- If retry fails after 10 attempts: Transition to `OUTPUT_FAULT`
-
-**Implementation**:
-```cpp
-if (network_send_failed) {
-    network_errors_++;
-    if (state_ == SinkState::RUNNING) {
-        state_ = SinkState::OUTPUT_RETRY;
-        retry_count_ = 0;
-        last_retry_time_ = now_utc;
-    }
-}
-
-// Retry logic
-if (state_ == SinkState::OUTPUT_RETRY) {
-    if ((now_utc - last_retry_time_) > 1'000'000) {  // 1 second
-        if (ReopenNetworkSocket()) {
-            state_ = SinkState::RUNNING;
-            network_errors_ = 0;
-            retry_count_ = 0;
-        } else {
-            retry_count_++;
-            if (retry_count_ > 10) {
-                state_ = SinkState::OUTPUT_FAULT;
-            }
-        }
-        last_retry_time_ = now_utc;
-    }
-}
-```
-
-#### OUTPUT_RETRY → OUTPUT_FAULT
-
-**Trigger**: Network retry fails after maximum attempts
-
-**Conditions**:
-- `retry_count_ > kMaxRetryAttempts` (10)
-- Network socket cannot be reopened
-
-**Actions**:
-1. Log critical error: `"[MpegTSPlayoutSink] Output fault: unrecoverable"`
-2. Stop encoding (drop frames)
-3. Transition to `OUTPUT_FAULT`
-4. Emit fault event to metrics system
-
-**Recovery**:
-- Manual recovery only: Call `Stop()` and `Start()` to reset sink
-- Or: Fix network connectivity and restart sink
-
-#### RUNNING → BUFFER_STARVATION
-
-**Trigger**: Buffer empty for extended period
-
-**Conditions**:
-- `consecutive_empty_count_ > 500` (5 seconds at 10ms intervals)
-- Buffer remains empty
-
-**Actions**:
-1. Log warning: `"[MpegTSPlayoutSink] Buffer starvation: empty for > 5s"`
-2. Transition to `BUFFER_STARVATION`
-3. Continue waiting for frames (do not drop frames)
-
-**Recovery**:
-- If buffer receives frames: Transition to `RUNNING`
-- If buffer remains empty > 30 seconds: Log critical error, remain in `BUFFER_STARVATION`
-
-#### RUNNING → HARD_DESYNC
-
-**Trigger**: Hard desync persists
-
-**Conditions**:
-- `gap_us < -kHardDesyncThresholdUs` (100ms) for > 1 second
-- Desync cannot be recovered via catch-up
-
-**Actions**:
-1. Log critical error: `"[MpegTSPlayoutSink] Hard desync: <gap_ms>ms for > 1s"`
-2. Reset encoder state (force IDR frame)
-3. Drop all late frames
-4. Transition to `HARD_DESYNC`
-5. Emit desync event to metrics system
-
-**Recovery**:
-- Reset encoder and drop frames until within tolerance
-- If recovery succeeds: Transition to `RUNNING`
-- If desync persists > 5 seconds: Log critical error, remain in `HARD_DESYNC`
-
-### Fault Event Reporting
-
-All fault transitions emit events to the metrics system:
-
-```cpp
-enum class SinkFault {
-    ENCODER_FAULT,
-    OUTPUT_FAULT,
-    BUFFER_STARVATION,
-    HARD_DESYNC
-};
-
-void EmitFaultEvent(SinkFault fault) {
-    metrics_exporter_->RecordSinkFault(channel_id_, fault, now_utc);
-}
-```
-
-### State Query Interface
-
-```cpp
-SinkState GetState() const { return state_; }
-bool IsFaultState() const {
-    return state_ == SinkState::ENCODER_FAULT ||
-           state_ == SinkState::OUTPUT_FAULT ||
-           state_ == SinkState::BUFFER_STARVATION ||
-           state_ == SinkState::HARD_DESYNC;
-}
-```
-
-### Fault Recovery Constants
-
-```cpp
-constexpr int kMaxEncoderErrors = 10;        // Max errors in 1 second
-constexpr int kMaxRetryAttempts = 10;         // Max network retry attempts
-constexpr int64_t kRetryIntervalUs = 1'000'000;  // 1 second between retries
-constexpr int64_t kEncoderResetIntervalUs = 5'000'000;  // 5 seconds between encoder resets
-constexpr int64_t kBufferStarvationThresholdUs = 5'000'000;  // 5 seconds
-constexpr int64_t kHardDesyncThresholdUs = 100'000;  // 100ms
-constexpr int64_t kHardDesyncDurationUs = 1'000'000;  // 1 second
-```
-
----
-
-## 6.5. Lifecycle & Events
-
-### Lifecycle Methods
-
-**start()**:
-1. Open TCP socket (`socket()`, `bind()`, `listen()`)
-2. Await client (blocking `accept()` - may run in separate thread)
-3. Init encoder (pre-allocate encoder context)
-4. Init muxer (create MPEG-TS format context)
-5. Start worker thread that owns the timing loop
-6. Worker thread begins continuously checking MasterClock vs frame PTS
-
-**stop()**:
-1. Signal worker thread to stop (`stop_requested_ = true`)
-2. Wait for worker thread to exit (join thread)
-3. Close muxer (write trailer, close output)
-4. Close encoder (free encoder context)
-5. Close socket (close client and listen sockets)
-6. Flush anything needed (encoder buffers, muxer buffers)
-
-**isRunning()**:
-- Returns `true` if worker thread is running AND encoder + muxer + socket are active
-- Returns `false` if worker thread is stopped OR any component is not initialized or closed
-
-### Events Emitted
-
-The sink emits events via callback or event system:
-
-```cpp
-enum class SinkEvent {
-    SINK_READY,              // Sink initialized and ready
-    CLIENT_CONNECTED,        // TCP client connected
-    CLIENT_DISCONNECTED,     // TCP client disconnected
-    ENCODE_ERROR,            // Encoding failure
-    MUX_ERROR,              // Muxing failure
-    SOCKET_ERROR,           // Network socket error
-    BUFFER_UNDERFLOW,       // Buffer empty (producer too slow)
-    BUFFER_OVERFLOW,        // Buffer full (producer too fast)
-    NETWORK_BACKPRESSURE,   // TCP socket buffer full
-    ERROR_UNSUPPORTED_PIXEL_FORMAT  // Unsupported input format
-};
-```
-
-**Event Emission**:
-```cpp
-void EmitEvent(SinkEvent event, int64_t value = 0) {
-    if (event_callback_) {
-        event_callback_(event, value, now_utc_);
-    }
-    // Also log event
-    LogEvent(event, value);
-}
-```
-
----
-
-## 6.6. Failure Modes & Guarantees
-
-### Hard Errors (Sink Stops)
-
-These errors cause the sink to stop and enter fault state:
-
-1. **Socket creation failed**:
-   - `socket()` or `bind()` fails
-   - Sink cannot start
-   - Emit `SOCKET_ERROR` event
-   - `start()` returns `false`
-
-2. **Muxer/encoder init failed**:
-   - Encoder context allocation fails
-   - MPEG-TS format context creation fails
-   - Sink cannot start
-   - Emit `ENCODE_ERROR` or `MUX_ERROR` event
-   - `start()` returns `false`
-
-3. **Unsupported pixel format**:
-   - Input frame format not supported
-   - libswscale conversion fails
-   - Sink enters fault state
-   - Emit `ERROR_UNSUPPORTED_PIXEL_FORMAT` event
-
-4. **Corrupted stream state**:
-   - Encoder state corruption
-   - Muxer state corruption
-   - Sink enters fault state
-   - Requires reset or restart
-
-### Soft Errors (Sink Keeps Running)
-
-These errors are logged but do not stop the sink:
-
-1. **Dropped frame** (logged):
-   - Frame is late (dropped in overflow handling)
-   - Frame dropped due to network backpressure
-   - Logged but sink continues
-
-2. **Buffer underflow**:
-   - Buffer empty when timing loop checks
-   - Apply underflow policy (frame freeze, black frame, skip)
-   - Emit `BUFFER_UNDERFLOW` event
-   - Sink continues
-
-3. **Buffer overflow**:
-   - Late frames detected
-   - Frames dropped
-   - Emit `BUFFER_OVERFLOW` event
-   - Sink continues
-
-4. **Network backpressure**:
-   - TCP socket buffer full
-   - Frame dropped
-   - Emit `NETWORK_BACKPRESSURE` event
-   - Sink continues
-
-### Guarantees
-
-**The sink guarantees**:
-- ✅ Never blocks producer thread (non-blocking buffer operations)
-- ✅ Never crashes on buffer conditions (underflow/overflow handled gracefully)
-- ✅ Never corrupts stream (encoder/muxer state maintained correctly)
-- ✅ Deterministic behavior (same input → same output)
-- ✅ Owns timing loop (continuously checks MasterClock vs frame PTS)
-
-**The sink does NOT guarantee**:
-- ❌ No frame drops (frames may be dropped due to timing or network)
-- ❌ Continuous output (buffer underflow may cause gaps)
-- ❌ Perfect sync (timing may drift within tolerance)
-
----
-
-## 6.7. Testability Contracts
-
-Test suites can target these specific behaviors:
-
-### Behavior Tests
-
-**Timing loop behavior**:
-- Verify sink worker thread continuously runs timing loop
-- Verify sink queries MasterClock and compares with frame PTS
-- Verify frame selection based on PTS comparison (output when PTS due)
-- Verify early frames are not output (wait until PTS due)
-- Verify late frames are dropped (output immediately if PTS overdue)
-
-**Underflow & overflow conditions**:
-- Test buffer empty → underflow policy applied
-- Test buffer full → overflow policy applied
-- Test frame freeze vs black frame vs skip
-- Test frame dropping behavior
-
-**Frame consumption order**:
-- Verify frames consumed in FIFO order
-- Verify PTS monotonicity in output
-- Verify no frame reordering
-
-**Realtime sync with master clock**:
-- Verify output timing matches MasterClock
-- Verify tolerance compliance (±5ms)
-- Verify desync detection and recovery
-
-### Encoding Tests
-
-**Pixel format conversion**:
-- Test YUV420P → H.264 (direct)
-- Test RGBA → YUV420P → H.264 (conversion)
-- Test unsupported format error handling
-
-**Frame-to-packet timing correctness**:
-- Verify encoder PTS matches MasterClock
-- Verify MPEG-TS PTS continuity
-- Verify GOP structure (IDR every N frames)
-
-**Output PTS continuity**:
-- Verify PTS increases monotonically
-- Verify no PTS gaps or jumps
-- Verify PTS matches input frame timing
-
-### Networking Tests
-
-**Client connect/disconnect**:
-- Test TCP client connection
-- Test client disconnect handling
-- Test reconnect after disconnect
-- Test multiple connect/disconnect cycles
-
-**Nonblocking write behavior**:
-- Test socket buffer full → frame drop
-- Test network backpressure handling
-- Test write error handling
-- Verify no blocking on write
+## 6. Timing & Scheduling
+
+### 6.1 High-Level Timing Model
+
+The **MpegTSPlayoutSink** owns its own timing loop and is the authority on *when* frames are encoded and sent. It:
+
+- Runs a dedicated **worker thread** that:
+  - pulls time from `MasterClock` (`now_utc_us()`)
+  - decides when each frame is due
+  - pulls frames from the `FrameRingBuffer`
+  - encodes and muxes them into an MPEG-TS stream
+
+- Treats `MasterClock` as a read-only station clock:
+  - **MasterClock never pushes ticks or callbacks**
+  - The sink calls `master_clock_->now_utc_us()` whenever it needs the current station time
+
+The goal is: **frames come out of the sink in real time, aligned to MasterClock, according to their media PTS.**
+
+### 6.2 Mapping Media PTS to Station Time
+
+The sink receives decoded frames from `FrameRingBuffer` where:
+
+- `frame.metadata.pts` is in **microseconds**, starting at or near 0 for the first frame
+- PTS is **monotonically increasing** within one asset (guaranteed by VideoFileProducer contract)
+
+The sink maps media PTS to station (wall) time using a simple affine transform:
+
+- On the first frame it accepts for playout, it computes:
+
+  ```cpp
+  pts_zero_utc_us = master_clock_->now_utc_us() - frame.metadata.pts
+  ```
+
+- For any subsequent frame with `pts`, the target station time is:
+
+  ```cpp
+  target_utc_us = pts_zero_utc_us + frame.metadata.pts
+  ```
+
+This keeps media time and station time locked together:
+
+- If MasterClock jumps forward, playout sinks will naturally catch up
+- If decode stalls and a frame arrives late, the sink can detect "we are late" by comparing `now_utc_us` to `target_utc_us`
+
+### 6.3 Worker Loop States
+
+The worker thread of MpegTSPlayoutSink operates with the following states (see **FE-012: Error → Sink Status Mapping** for detailed status behavior):
+
+- **Idle** – not started; no frames are pulled
+- **Running** – main timing loop active; sink is operating normally (may have recoverable errors)
+- **Degraded** – sink is operating but experiencing degraded-mode errors (sustained starvation, repeated late frames)
+- **Stopping** – graceful shutdown requested; sink drains buffers and terminates
+- **Faulted** – unrecoverable error (encoder/muxer failure, corrupted frame memory); sink stops output (see **FE-020: Fault Mode Behavior & Latching**)
+
+**Transitions**:
+- `Idle → Running` when `Start()` is called and encoder/muxer are initialized
+- `Running → Degraded` when degraded-mode errors are encountered (sustained starvation, repeated late frames)
+- `Running → Stopping` when `RequestStop()` is called
+- `Running → Faulted` when unrecoverable errors occur (encoder/muxer failure, corrupted memory)
+- `Degraded → Running` when degraded conditions clear (if recovery rules allow)
+- `Degraded → Faulted` when degraded conditions escalate to unrecoverable errors
+- `Stopping → Idle` when worker thread exits cleanly
+- `Faulted → Idle` only via explicit reset or full teardown + re-instantiation (fault latching - see FE-020)
+
+**Note**: Status elevation follows strict rules (FE-012): once elevated to `Faulted`, status cannot silently clear without explicit reset. `Degraded` status may return to `Running` if recovery conditions are met.
+
+### 6.4 Main Timing Loop (Conceptual)
+
+The main loop for `Running` is:
+
+1. **Read current time from MasterClock**:
+
+   ```cpp
+   now = master_clock_->now_utc_us()
+   ```
+
+2. **If there is no "current frame" loaded, attempt to pop one from the FrameRingBuffer**:
+
+   - If a frame is available:
+     - If this is the first frame, compute `pts_zero_utc_us` as described above
+     - Compute `target_utc_us = pts_zero_utc_us + frame.pts`
+   - If the buffer is empty:
+     - Record a buffer underrun
+     - Sleep for a small backoff (e.g. 2–5 ms) and retry
+
+3. **Decide what to do with the current frame**:
+
+   - **On-time or early**:
+
+     ```cpp
+     if now < target_utc_us:
+         sleep until target_utc_us (clamped to a small minimum granularity)
+         now = master_clock_->now_utc_us()
+     ```
+     Then encode and send the frame.
+
+   - **Slightly late (within tolerance)**:
+
+     ```cpp
+     lateness = now - target_utc_us
+     if 0 <= lateness <= kMaxLateToleranceUs:
+         encode and send the frame immediately
+     ```
+
+   - **Very late (beyond tolerance)**:
+
+     ```cpp
+     if lateness > kMaxLateToleranceUs:
+         drop the frame, count a "late drop", and pull the next frame
+         recompute its target time and repeat the decision
+     ```
+
+4. **After encoding and muxing the frame, clear the "current frame" and go back to step 1.**
+
+This loop continues until:
+- `Stop()` is requested, or
+- an unrecoverable encoder/muxer error occurs
+
+### 6.5 Underrun and Overrun Behavior
+
+The sink must handle buffer edge conditions explicitly:
+
+**Buffer Underrun (no frames available when we need one)**:
+- Increment `stats.buffer_underruns`
+- Do not attempt to synthesize frames in the sink
+- Sleep a short backoff (2–5 ms) and retry
+- If underrun persists beyond a configurable threshold, log a warning
+
+**Buffer Overrun (frames so late we must drop them)**:
+- When `now - target_utc_us > kMaxLateToleranceUs`, the frame is considered too late
+- Increment `stats.late_frame_drops`
+- Drop the frame without encoding/muxing it
+- Pull the next frame and evaluate again
+
+**Typical values**:
+- `kMaxLateToleranceUs ≈ 1.5 * frame_duration_us` (e.g. ~50 ms at 30 fps)
+- Underrun backoff: 2–5 ms
+
+### 6.6 Alignment with MasterClock
+
+The sink must only obtain time from MasterClock:
+
+- It must not call `std::chrono::steady_clock::now()` or similar directly
+- All "what time is it?" decisions flow through `master_clock_->now_utc_us()`
+- Sleep/wait primitives (e.g. `std::this_thread::sleep_for`) use durations derived from MasterClock deltas
+
+This guarantees that:
+- All channels and sinks share a single station time base
+- Test code can use a fake MasterClock to simulate time progress deterministically
+
+### 6.7 Interaction with Producer and Buffer
+
+The timing contract between producer and sink is:
+
+- Producer tries to keep the `FrameRingBuffer` filled (depth ≈ 1–2 seconds of video)
+- Sink pops frames at real-time pace determined by MasterClock and frame PTS
+- If producer is faster, buffer fills and producer sees backpressure (already covered by VideoFileProducer contract)
+- If producer is slower, buffer empties and sink sees underruns (as defined above)
+
+The sink does not try to adjust decode rate or manipulate the producer. It only:
+
+- Observes buffer depth indirectly (empty vs non-empty)
+- Observes frame PTS and MasterClock to decide when to output
+- Emits statistics on underruns and late drops for higher-level orchestration to react to
 
 ---
 
@@ -2280,34 +1446,75 @@ struct SinkConfig {
 
 ### Error Events
 
-The MpegTSPlayoutSink handles these error conditions:
+The MpegTSPlayoutSink handles error conditions according to **FE-005: Error Detection and Classification**. Errors are classified into three categories:
 
-1. **Encoder initialization failure**:
-   - Logs error: `"Failed to initialize encoder, falling back to stub mode"`
-   - Sets `config.stub_mode = true`
-   - Continues with stub frame consumption
+#### Recoverable Errors
 
-2. **Encoding error** (encoder failure, codec error):
+These errors increment counters but do not force a state transition. Sink remains in `Running` status:
+
+1. **Late frames** (within discardable threshold):
+   - Increments `stats.late_frames`
+   - Frames are dropped but sink continues
+
+2. **Temporary upstream starvation**:
+   - Increments `stats.buffer_underruns`
+   - Sink waits and retries (see FE-006)
+
+3. **Transient encoding errors** (single frame failure):
    - Logs error: `"Encoding errors: N"`
    - Increments `stats.encoding_errors`
    - Skips frame and continues (allows recovery)
 
-3. **Network error** (UDP send failure, HTTP connection error):
+4. **Transient network errors** (single send failure):
    - Logs error: `"Network errors: N"`
    - Increments `stats.network_errors`
    - Retries send with backoff
    - Does not stop sink (allows recovery)
 
-4. **Buffer empty**:
-   - Returns false from `FrameRingBuffer->Pop()`
-   - Increments `buffer_empty_count_`
-   - Waits 10ms (`kSinkWaitUs`)
-   - Retries on next iteration
+#### Degraded-Mode Errors
 
-5. **Teardown timeout**:
-   - If buffer does not drain within `drain_timeout`:
-   - Logs: `"Teardown timeout reached; forcing stop"`
-   - Calls `ForceStop()`
+These errors elevate status to `Degraded` but output remains valid:
+
+1. **Sustained starvation** (above threshold, e.g., > 500ms):
+   - Increments `stats.buffer_underruns`
+   - Status elevates to `Degraded`
+   - Output remains valid MPEG-TS
+
+2. **Repeated late frames** (beyond discard window):
+   - Increments `stats.late_frames` and `stats.frames_dropped`
+   - Status elevates to `Degraded`
+   - Output remains valid MPEG-TS
+
+3. **Buffer overrun/underrun during steady load**:
+   - Status elevates to `Degraded`
+   - Upstream should be alerted
+
+#### Fault / Unrecoverable Errors
+
+These errors elevate status to `Faulted` and halt output (see **FE-020: Fault Mode Behavior & Latching**):
+
+1. **Encoder initialization failure** (cannot fall back to stub):
+   - Logs error: `"Failed to initialize encoder"`
+   - Status elevates to `Faulted`
+   - Sink halts output
+
+2. **Corrupted frame memory**:
+   - Status elevates to `Faulted`
+   - Sink halts output
+
+3. **Repeated internal exceptions**:
+   - Status elevates to `Faulted`
+   - Sink halts output
+
+4. **TS muxer producing invalid packets**:
+   - Status elevates to `Faulted`
+   - Sink halts output
+
+**Fault Latching** (FE-020): Once status is `Faulted`, it remains latched until:
+- Explicit `reset()` API call (if implemented), or
+- Full teardown + re-instantiation of sink object
+
+**Error Classification** (FE-005): All errors must be detected, classified, and logged. Recoverable errors must not cause sink fault. Unrecoverable errors must not be ignored.
 
 ### Lifecycle Events
 
@@ -2570,9 +1777,24 @@ STOPPED
 
 ## 8. Contracts
 
-This section defines testable, enforceable requirements for the MPEG-TS Playout Sink. These contracts are similar to FE-001 etc. in the VideoFileProducerDomainContract.md.
+This section provides a high-level overview of the functional expectations for the MPEG-TS Playout Sink. **For detailed contract definitions, test criteria, and pass/fail conditions, see [MpegTSPlayoutSinkDomainContract.md](../contracts/MpegTSPlayoutSinkDomainContract.md)**.
 
-### PS-001: Sink Starts and Stops Correctly
+The MPEG-TS Playout Sink implements **FE-001 through FE-023** functional expectations, covering:
+
+- **Lifecycle Management** (FE-001): Start, stop, and teardown operations
+- **Frame Consumption** (FE-002): FIFO frame pulling and PTS monotonicity
+- **Timing Control** (FE-003): MasterClock-driven playout timing
+- **Encoding** (FE-004, FE-013): Valid H.264 encoding of decoded frames
+- **Error Handling** (FE-005, FE-012): Error detection, classification, and status mapping
+- **Buffer Management** (FE-006, FE-007): Empty buffer and overrun handling
+- **Statistics** (FE-008): Accurate reporting of operational metrics
+- **Network I/O** (FE-009, FE-010, FE-011): Nonblocking writes, queue overflow, client disconnect
+- **Stream Validation** (FE-014, FE-015, FE-016): PTS monotonicity, FFprobe readability, timing preservation
+- **Timing Compliance** (FE-017, FE-018, FE-019): Real-time stability, PTS/DTS integrity, PCR cadence
+- **Fault Management** (FE-020): Fault latching and isolation
+- **Resilience** (FE-021, FE-022, FE-023): Encoder stall recovery, queue invariants, TS packet alignment
+
+### FE-001: Sink Starts and Stops Correctly
 
 **Rule**: Sink must support clean start, stop, and teardown operations.
 
@@ -2593,7 +1815,7 @@ This section defines testable, enforceable requirements for the MPEG-TS Playout 
 
 ---
 
-### PS-002: Pulls Frames in Order
+### FE-002: Pulls Frames in Order
 
 **Rule**: Sink must pull decoded frames from buffer in order (FIFO).
 
@@ -2610,7 +1832,7 @@ This section defines testable, enforceable requirements for the MPEG-TS Playout 
 
 ---
 
-### PS-003: Obeys Master Clock
+### FE-003: Obeys Master Clock
 
 **Rule**: Sink must query MasterClock and output frames at the correct time.
 
@@ -2624,11 +1846,11 @@ This section defines testable, enforceable requirements for the MPEG-TS Playout 
 - ✅ Clock query: Sink queries MasterClock before each frame output
 - ✅ Ahead of schedule: Sink sleeps when frame deadline is in future
 - ✅ Behind schedule: Sink drops frames when frame deadline is in past
-- ✅ Timing accuracy: Frame output timing matches MasterClock deadlines (within 1ms)
+- ✅ Timing accuracy: Frame output timing matches MasterClock deadlines (conforms to FE-017 jitter/drift bounds)
 
 ---
 
-### PS-004: Encodes Valid H.264 Frames
+### FE-004: Encodes Valid H.264 Frames
 
 **Rule**: Sink must encode decoded frames into valid H.264 NAL units.
 
@@ -2646,7 +1868,7 @@ This section defines testable, enforceable requirements for the MPEG-TS Playout 
 
 ---
 
-### PS-005: Produces Playable MPEG-TS Stream Verified in VLC
+### FE-015: Output Is Readable by FFprobe (Playable MPEG-TS Stream)
 
 **Rule**: Sink must produce a playable MPEG-TS stream that can be verified in VLC.
 
@@ -2665,7 +1887,7 @@ This section defines testable, enforceable requirements for the MPEG-TS Playout 
 
 ---
 
-### PS-006: Handles Empty Buffer (Waits, No Crash)
+### FE-006: Handles Empty Buffer (Waits, No Crash)
 
 **Rule**: Sink must handle empty buffer gracefully by waiting, not crashing.
 
@@ -2685,7 +1907,7 @@ This section defines testable, enforceable requirements for the MPEG-TS Playout 
 
 ---
 
-### PS-007: Handles Buffer Overrun (Drops, No Crash)
+### FE-007: Handles Buffer Overrun (Drops, No Crash)
 
 **Rule**: Sink must handle buffer overrun gracefully by dropping late frames, not crashing.
 
@@ -2706,7 +1928,7 @@ This section defines testable, enforceable requirements for the MPEG-TS Playout 
 
 ---
 
-### PS-008: Properly Reports Stats (Frames Sent, Frames Dropped, Late Frames)
+### FE-008: Properly Reports Stats (Frames Sent, Frames Dropped, Late Frames)
 
 **Rule**: Sink statistics must accurately reflect operational state.
 
@@ -2727,6 +1949,10 @@ This section defines testable, enforceable requirements for the MPEG-TS Playout 
 - ✅ Error tracking: `GetEncodingErrors()` and `GetNetworkErrors()` track failures
 - ✅ Thread safety: Statistics can be read from any thread without race conditions
 - ✅ Accuracy: Statistics reflect actual operational state
+
+---
+
+**Note**: The above contracts (FE-001 through FE-008, FE-015) provide high-level summaries. For complete contract definitions including all 23 functional expectations (FE-001 through FE-023), detailed test criteria, pass/fail conditions, and test file references, see **[MpegTSPlayoutSinkDomainContract.md](../contracts/MpegTSPlayoutSinkDomainContract.md)**.
 
 ---
 

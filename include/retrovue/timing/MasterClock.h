@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <thread>
+#include <chrono>
 
 namespace retrovue::timing {
 
@@ -22,6 +24,28 @@ class MasterClock {
 
   // Reports measured drift in parts per million relative to upstream reference.
   virtual double drift_ppm() const = 0;
+
+  // Returns true if this is a fake/test clock (for testing only).
+  // Fake clocks should not trigger real-time sleeps in consumers.
+  virtual bool is_fake() const { return false; }
+
+  // Blocks until the clock reaches or exceeds target_utc_us.
+  // For real clocks, this uses sleep-based waiting.
+  // For fake clocks, this blocks on a condition variable that is woken by advance_us().
+  // This method respects stop_requested_ patterns in consumers by checking periodically.
+  virtual void WaitUntilUtcUs(int64_t target_utc_us) const {
+    // Default implementation: sleep-based waiting
+    while (true) {
+      const int64_t now = now_utc_us();
+      const int64_t remaining = target_utc_us - now;
+      if (remaining <= 0) {
+        break;
+      }
+      const int64_t sleep_us = (remaining > 2'000) ? remaining - 1'000
+                                                    : std::max<int64_t>(remaining / 2, 200);
+      std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+    }
+  }
 };
 
 std::shared_ptr<MasterClock> MakeSystemMasterClock(int64_t epoch_utc_us, double rate_ppm);

@@ -18,6 +18,7 @@ struct AVCodecContext;
 struct AVFrame;
 struct AVPacket;
 struct SwsContext;
+struct SwrContext;
 
 namespace retrovue::decode {
 
@@ -92,6 +93,10 @@ class FFmpegDecoder {
   // Returns true if frame decoded successfully, false on error or EOF.
   bool DecodeNextFrame(buffer::FrameRingBuffer& output_buffer);
 
+  // Decodes the next audio frame and pushes it to the output buffer.
+  // Returns true if audio frame decoded successfully, false on error or EOF.
+  bool DecodeNextAudioFrame(buffer::FrameRingBuffer& output_buffer);
+
   // Closes the decoder and releases resources.
   void Close();
 
@@ -114,17 +119,32 @@ class FFmpegDecoder {
   // Finds the best video stream in the input.
   bool FindVideoStream();
 
+  // Finds the best audio stream in the input.
+  bool FindAudioStream();
+
   // Initializes the codec and codec context.
   bool InitializeCodec();
+
+  // Initializes the audio codec and codec context.
+  bool InitializeAudioCodec();
 
   // Initializes the scaler for resolution conversion.
   bool InitializeScaler();
 
+  // Initializes the resampler for audio format conversion.
+  bool InitializeResampler();
+
   // Reads and decodes a single frame.
   bool ReadAndDecodeFrame(buffer::Frame& output_frame);
 
+  // Reads and decodes a single audio frame.
+  bool ReadAndDecodeAudioFrame(buffer::AudioFrame& output_frame);
+
   // Converts AVFrame to our Frame format.
   bool ConvertFrame(AVFrame* av_frame, buffer::Frame& output_frame);
+
+  // Converts AVFrame to our AudioFrame format (PCM S16 interleaved).
+  bool ConvertAudioFrame(AVFrame* av_frame, buffer::AudioFrame& output_frame);
 
   // Updates decoder statistics.
   void UpdateStats(double decode_time_ms);
@@ -135,17 +155,24 @@ class FFmpegDecoder {
   // FFmpeg contexts (opaque pointers)
   AVFormatContext* format_ctx_;
   AVCodecContext* codec_ctx_;
+  AVCodecContext* audio_codec_ctx_;
   AVFrame* frame_;
   AVFrame* scaled_frame_;
+  AVFrame* audio_frame_;
   AVPacket* packet_;
   SwsContext* sws_ctx_;
+  SwrContext* swr_ctx_;  // Audio resampler
 
   int video_stream_index_;
+  int audio_stream_index_;
   bool eof_reached_;
+  bool audio_eof_reached_;
   
   // Timing
   int64_t start_time_;
   double time_base_;
+  int64_t audio_start_time_;
+  double audio_time_base_;
 };
 
 }  // namespace retrovue::decode

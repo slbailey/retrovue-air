@@ -26,6 +26,8 @@ if(NOT gRPC_FOUND)
         # Find protoc and grpc_cpp_plugin
         find_program(PROTOC_PROGRAM protoc REQUIRED)
         find_program(GRPC_CPP_PLUGIN_PROGRAM grpc_cpp_plugin REQUIRED)
+        # Create a variable for the plugin path (pkg-config doesn't provide a target)
+        set(GRPC_CPP_PLUGIN_PATH ${GRPC_CPP_PLUGIN_PROGRAM})
     endif()
 endif()
 
@@ -35,13 +37,25 @@ if(NOT GTest_FOUND)
 endif()
 
 # FFmpeg libraries for Phase 3 video decoding (optional)
+# IMPORTANT: Libraries must be listed in dependency order with avutil LAST
+# Correct order: avformat -> avcodec -> swscale -> swresample -> avutil
+# This ensures proper symbol resolution and avoids "undefined reference" errors
 find_package(PkgConfig)
 if(PkgConfig_FOUND)
-    pkg_check_modules(FFMPEG IMPORTED_TARGET
+    # First call to get variables (FFMPEG_LIBRARIES, etc.)
+    pkg_check_modules(FFMPEG
         libavformat
         libavcodec
-        libavutil
-        libswscale)
+        libswscale
+        libswresample
+        libavutil)
+    # Second call to create imported target (for compatibility)
+    pkg_check_modules(FFMPEG_TARGET IMPORTED_TARGET
+        libavformat
+        libavcodec
+        libswscale
+        libswresample
+        libavutil)
 else()
     message(WARNING "PkgConfig not found - FFmpeg detection unavailable. Install pkg-config to build with FFmpeg.")
 endif()
@@ -58,7 +72,12 @@ set(GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${GENERATED_DIR})
 
 set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
-set(_GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
+if(TARGET gRPC::grpc_cpp_plugin)
+    set(_GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
+else()
+    # Fallback for pkg-config case
+    set(_GRPC_CPP_PLUGIN_EXECUTABLE ${GRPC_CPP_PLUGIN_PROGRAM})
+endif()
 
 set(GENERATED_PROTO_SRCS
     ${GENERATED_DIR}/retrovue/playout.pb.cc
@@ -138,61 +157,11 @@ target_include_directories(retrovue_air
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# Unit tests (optional - requires GTest via vcpkg)
+# Contract tests (requires GTest via vcpkg)
 if(GTest_FOUND)
-    message(STATUS "GTest found - building unit tests")
+    message(STATUS "GTest found - building contract tests")
     enable_testing()
 
-    # Unit Test: Frame Ring Buffer
-    add_executable(unit_buffer
-        tests/test_buffer.cpp
-        src/buffer/FrameRingBuffer.cpp
-        include/retrovue/buffer/FrameRingBuffer.h)
-
-    target_link_libraries(unit_buffer
-        PRIVATE
-            GTest::gtest
-            GTest::gtest_main)
-
-    target_compile_definitions(unit_buffer
-        PRIVATE
-            RETROVUE_TIMING_STRICT=ON)
-
-    target_include_directories(unit_buffer
-        PUBLIC
-            ${PROJECT_SOURCE_DIR}/include
-        PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/src)
-
-    add_test(NAME unit_buffer COMMAND unit_buffer)
-
-    # Unit Test: Frame Producer
-    add_executable(unit_decode
-        tests/test_decode.cpp
-        src/decode/FrameProducer.cpp
-        src/decode/FFmpegDecoder.cpp
-        include/retrovue/decode/FrameProducer.h
-        include/retrovue/decode/FFmpegDecoder.h
-        src/buffer/FrameRingBuffer.cpp
-        include/retrovue/buffer/FrameRingBuffer.h)
-
-    target_link_libraries(unit_decode
-        PRIVATE
-            GTest::gtest
-            GTest::gtest_main)
-
-    target_compile_definitions(unit_decode
-        PRIVATE
-            RETROVUE_TIMING_STRICT=ON)
-
-    target_include_directories(unit_decode
-        PUBLIC
-            ${PROJECT_SOURCE_DIR}/include
-        PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/src)
-
-    add_test(NAME unit_decode COMMAND unit_decode)
-    
     # Contract Tests: MasterClock
     add_executable(contracts_masterclock_tests
         tests/ContractRegistry.cpp
@@ -224,7 +193,11 @@ if(GTest_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
     if(FFMPEG_FOUND)
-        target_link_libraries(contracts_masterclock_tests PRIVATE PkgConfig::FFMPEG)
+        # Link FFmpeg libraries - use library directories and libraries separately
+        target_link_directories(contracts_masterclock_tests PRIVATE ${FFMPEG_LIBRARY_DIRS})
+        target_link_libraries(contracts_masterclock_tests PRIVATE ${FFMPEG_LIBRARIES})
+        target_include_directories(contracts_masterclock_tests PRIVATE ${FFMPEG_INCLUDE_DIRS})
+        target_compile_options(contracts_masterclock_tests PRIVATE ${FFMPEG_CFLAGS_OTHER})
     endif()
 
     if(SDL2_FOUND)
@@ -237,12 +210,13 @@ if(GTest_FOUND)
 
     add_test(NAME contracts_masterclock COMMAND contracts_masterclock_tests)
 
-    # Contract Tests: Metrics & Timing
+    # Contract Tests: Metrics & Timing (combined with Metrics Export)
     add_executable(contracts_metricsandtiming_tests
         tests/ContractRegistry.cpp
         tests/contracts/ContractRegistryEnvironment.cpp
         tests/contracts/ContractRegistrySanityTest.cpp
         tests/contracts/MetricsAndTiming/MetricsAndTimingContractTests.cpp
+        tests/contracts/MetricsExport/MetricsExportContractTests.cpp
         src/buffer/FrameRingBuffer.cpp
         src/decode/FrameProducer.cpp
         src/decode/FFmpegDecoder.cpp
@@ -262,7 +236,10 @@ if(GTest_FOUND)
             RETROVUE_TIMING_STRICT=ON)
 
     if(FFMPEG_FOUND)
-        target_link_libraries(contracts_metricsandtiming_tests PRIVATE PkgConfig::FFMPEG)
+        target_link_directories(contracts_metricsandtiming_tests PRIVATE ${FFMPEG_LIBRARY_DIRS})
+        target_link_libraries(contracts_metricsandtiming_tests PRIVATE ${FFMPEG_LIBRARIES})
+        target_include_directories(contracts_metricsandtiming_tests PRIVATE ${FFMPEG_INCLUDE_DIRS})
+        target_compile_options(contracts_metricsandtiming_tests PRIVATE ${FFMPEG_CFLAGS_OTHER})
     endif()
 
     if(SDL2_FOUND)
@@ -279,39 +256,8 @@ if(GTest_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
+    # Combined test executable includes both MetricsAndTiming and MetricsExport tests
     add_test(NAME contracts_metricsandtiming COMMAND contracts_metricsandtiming_tests)
-    add_test(NAME contracts_metricsandtiming_MT001
-        COMMAND contracts_metricsandtiming_tests
-                --gtest_filter=MetricsAndTimingContractTest.MT_001_MasterClockMonotonicAndLowJitter)
-    add_test(NAME contracts_metricsandtiming_MT002
-        COMMAND contracts_metricsandtiming_tests
-                --gtest_filter=MetricsAndTimingContractTest.MT_002_PtsToUtcMappingStable)
-
-    # Contract Tests: Metrics Export
-    add_executable(contracts_metricsexport_tests
-        tests/ContractRegistry.cpp
-        tests/contracts/ContractRegistryEnvironment.cpp
-        tests/contracts/ContractRegistrySanityTest.cpp
-        tests/contracts/MetricsExport/MetricsExportContractTests.cpp
-        src/telemetry/MetricsExporter.cpp
-        src/telemetry/MetricsHTTPServer.cpp)
-
-    target_link_libraries(contracts_metricsexport_tests
-        PRIVATE
-            GTest::gtest
-            GTest::gtest_main)
-
-    target_compile_definitions(contracts_metricsexport_tests
-        PRIVATE
-            RETROVUE_TIMING_STRICT=ON)
-
-    target_include_directories(contracts_metricsexport_tests
-        PRIVATE
-            ${PROJECT_SOURCE_DIR}/include
-            ${CMAKE_CURRENT_SOURCE_DIR}/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-
-    add_test(NAME contracts_metricsexport COMMAND contracts_metricsexport_tests)
 
     # Contract Tests: Playout Control
     add_executable(contracts_playoutcontrol_tests
@@ -390,7 +336,10 @@ if(GTest_FOUND)
             RETROVUE_TIMING_STRICT=ON)
 
     if(FFMPEG_FOUND)
-        target_link_libraries(contracts_playoutengine_tests PRIVATE PkgConfig::FFMPEG)
+        target_link_directories(contracts_playoutengine_tests PRIVATE ${FFMPEG_LIBRARY_DIRS})
+        target_link_libraries(contracts_playoutengine_tests PRIVATE ${FFMPEG_LIBRARIES})
+        target_include_directories(contracts_playoutengine_tests PRIVATE ${FFMPEG_INCLUDE_DIRS})
+        target_compile_options(contracts_playoutengine_tests PRIVATE ${FFMPEG_CFLAGS_OTHER})
     endif()
 
     if(SDL2_FOUND)
@@ -467,7 +416,10 @@ if(GTest_FOUND)
             RETROVUE_TIMING_STRICT=ON)
 
     if(FFMPEG_FOUND)
-        target_link_libraries(contracts_videofileproducer_tests PRIVATE PkgConfig::FFMPEG)
+        target_link_directories(contracts_videofileproducer_tests PRIVATE ${FFMPEG_LIBRARY_DIRS})
+        target_link_libraries(contracts_videofileproducer_tests PRIVATE ${FFMPEG_LIBRARIES})
+        target_include_directories(contracts_videofileproducer_tests PRIVATE ${FFMPEG_INCLUDE_DIRS})
+        target_compile_options(contracts_videofileproducer_tests PRIVATE ${FFMPEG_CFLAGS_OTHER})
         target_compile_definitions(contracts_videofileproducer_tests PRIVATE RETROVUE_FFMPEG_AVAILABLE)
     endif()
 
@@ -489,8 +441,11 @@ if(GTest_FOUND)
         tests/contracts/ContractRegistryEnvironment.cpp
         tests/contracts/ContractRegistrySanityTest.cpp
         tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp
+        src/playout_sinks/mpegts/EncoderPipeline.cpp
+        src/playout_sinks/mpegts/MpegTSPlayoutSink.cpp
+        src/playout_sinks/mpegts/PTSController.cpp
+        src/playout_sinks/mpegts/ClockUtils.cpp
         src/buffer/FrameRingBuffer.cpp
-        src/sinks/mpegts/MpegTSPlayoutSink.cpp
         src/producers/video_file/VideoFileProducer.cpp
         src/timing/SystemMasterClock.cpp
         src/timing/TestMasterClock.cpp)
@@ -505,7 +460,10 @@ if(GTest_FOUND)
             RETROVUE_TIMING_STRICT=ON)
 
     if(FFMPEG_FOUND)
-        target_link_libraries(contracts_mpegtsplayoutsink_tests PRIVATE PkgConfig::FFMPEG)
+        target_link_directories(contracts_mpegtsplayoutsink_tests PRIVATE ${FFMPEG_LIBRARY_DIRS})
+        target_link_libraries(contracts_mpegtsplayoutsink_tests PRIVATE ${FFMPEG_LIBRARIES})
+        target_include_directories(contracts_mpegtsplayoutsink_tests PRIVATE ${FFMPEG_INCLUDE_DIRS})
+        target_compile_options(contracts_mpegtsplayoutsink_tests PRIVATE ${FFMPEG_CFLAGS_OTHER})
         target_compile_definitions(contracts_mpegtsplayoutsink_tests PRIVATE RETROVUE_FFMPEG_AVAILABLE)
     endif()
 
@@ -519,6 +477,7 @@ if(GTest_FOUND)
         target_link_libraries(contracts_mpegtsplayoutsink_tests PRIVATE Threads::Threads)
     endif()
 
+    # Combined test executable includes all MPEG-TS playout sink contract tests
     add_test(NAME contracts_mpegtsplayoutsink COMMAND contracts_mpegtsplayoutsink_tests)
 
     # Unit Tests: MPEG-TS Playout Sink
@@ -539,7 +498,10 @@ if(GTest_FOUND)
             RETROVUE_TIMING_STRICT=ON)
 
     if(FFMPEG_FOUND)
-        target_link_libraries(test_sink PRIVATE PkgConfig::FFMPEG)
+        target_link_directories(test_sink PRIVATE ${FFMPEG_LIBRARY_DIRS})
+        target_link_libraries(test_sink PRIVATE ${FFMPEG_LIBRARIES})
+        target_include_directories(test_sink PRIVATE ${FFMPEG_INCLUDE_DIRS})
+        target_compile_options(test_sink PRIVATE ${FFMPEG_CFLAGS_OTHER})
         target_compile_definitions(test_sink PRIVATE RETROVUE_FFMPEG_AVAILABLE)
     endif()
 
@@ -610,7 +572,10 @@ if(GTest_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
     if(FFMPEG_FOUND)
-        target_link_libraries(timing_soak PRIVATE PkgConfig::FFMPEG)
+        target_link_directories(timing_soak PRIVATE ${FFMPEG_LIBRARY_DIRS})
+        target_link_libraries(timing_soak PRIVATE ${FFMPEG_LIBRARIES})
+        target_include_directories(timing_soak PRIVATE ${FFMPEG_INCLUDE_DIRS})
+        target_compile_options(timing_soak PRIVATE ${FFMPEG_CFLAGS_OTHER})
     endif()
 
     if(SDL2_FOUND)

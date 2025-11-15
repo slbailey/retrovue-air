@@ -170,6 +170,9 @@ namespace retrovue::producers::video_file
     bool eof_reached_;
     double time_base_;  // Stream time base for PTS/DTS conversion
     int64_t last_pts_us_;  // For PTS monotonicity enforcement
+    int64_t last_decoded_frame_pts_us_;  // PTS of last decoded frame (for EOF pacing)
+    int64_t first_frame_pts_us_;  // PTS of first frame (for establishing time mapping)
+    int64_t playback_start_utc_us_;  // UTC time when first frame was decoded (for pacing)
 
     // State for stub frame generation
     std::atomic<int64_t> stub_pts_counter_;

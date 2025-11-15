@@ -59,6 +59,9 @@ namespace retrovue::producers::video_file
         eof_reached_(false),
         time_base_(0.0),
         last_pts_us_(0),
+        last_decoded_frame_pts_us_(0),
+        first_frame_pts_us_(0),
+        playback_start_utc_us_(0),
         stub_pts_counter_(0),
         frame_interval_us_(static_cast<int64_t>(std::round(kMicrosecondsPerSecond / config.target_fps))),
         next_stub_deadline_utc_(0)
@@ -105,6 +108,9 @@ namespace retrovue::producers::video_file
     next_stub_deadline_utc_.store(0, std::memory_order_release);
     eof_reached_ = false;
     last_pts_us_ = 0;
+    last_decoded_frame_pts_us_ = 0;
+    first_frame_pts_us_ = 0;
+    playback_start_utc_us_ = 0;
 
     // Set state to RUNNING before starting thread (so loop sees correct state)
     SetState(ProducerState::RUNNING);
@@ -252,10 +258,27 @@ namespace retrovue::producers::video_file
         }
       }
 
-      // Check EOF
+      // Check EOF - wait until last frame has been emitted at correct fake time
       if (eof_reached_)
       {
-        std::cout << "[VideoFileProducer] End of file reached" << std::endl;
+        // If using fake clock, wait until fake time reaches last frame's target UTC time
+        if (master_clock_ && master_clock_->is_fake() && 
+            last_decoded_frame_pts_us_ > 0 && first_frame_pts_us_ > 0)
+        {
+          int64_t last_frame_offset_us = last_decoded_frame_pts_us_ - first_frame_pts_us_;
+          int64_t last_frame_target_utc_us = playback_start_utc_us_ + last_frame_offset_us;
+          int64_t now_us = master_clock_->now_utc_us();
+          if (now_us < last_frame_target_utc_us)
+          {
+            // Wait until fake clock reaches last frame's target UTC time
+            while (master_clock_->now_utc_us() < last_frame_target_utc_us &&
+                   !stop_requested_.load(std::memory_order_acquire))
+            {
+              std::this_thread::yield();  // Busy-wait for fake clock
+            }
+          }
+        }
+        std::cout << "[VideoFileProducer] End of file reached, all frames emitted" << std::endl;
         EmitEvent("eof", "");
         break;
       }
@@ -485,92 +508,136 @@ namespace retrovue::producers::video_file
       return false;
     }
 
-    // Read and decode frame
-    while (true)
+    // Decode ONE frame at a time (paced according to fake time)
+    // Read packet
+    int ret = av_read_frame(format_ctx_, packet_);
+    
+    if (ret == AVERROR_EOF)
     {
-      // Read packet
-      int ret = av_read_frame(format_ctx_, packet_);
-      
-      if (ret == AVERROR_EOF)
-      {
-        eof_reached_ = true;
-        return false;
-      }
-      
-      if (ret < 0)
-      {
-        av_packet_unref(packet_);
-        return false;  // Read error
-      }
-
-      // Check if packet is from video stream
-      if (packet_->stream_index != video_stream_index_)
-      {
-        av_packet_unref(packet_);
-        continue;
-      }
-
-      // Send packet to decoder
-      ret = avcodec_send_packet(codec_ctx_, packet_);
+      eof_reached_ = true;
+      return false;
+    }
+    
+    if (ret < 0)
+    {
       av_packet_unref(packet_);
-      
-      if (ret < 0)
-      {
-        return false;  // Decode error
-      }
+      return false;  // Read error
+    }
 
-      // Receive decoded frame
-      ret = avcodec_receive_frame(codec_ctx_, frame_);
-      
-      if (ret == AVERROR(EAGAIN))
-      {
-        continue;  // Need more packets
-      }
-      
-      if (ret < 0)
-      {
-        return false;  // Decode error
-      }
+    // Check if packet is from video stream
+    if (packet_->stream_index != video_stream_index_)
+    {
+      av_packet_unref(packet_);
+      return true;  // Skip non-video packets, try again
+    }
 
-      // Successfully decoded a frame - scale and assemble
-      if (!ScaleFrame())
-      {
-        return false;
-      }
+    // Send packet to decoder
+    ret = avcodec_send_packet(codec_ctx_, packet_);
+    av_packet_unref(packet_);
+    
+    if (ret < 0)
+    {
+      return false;  // Decode error
+    }
 
-      buffer::Frame output_frame;
-      if (!AssembleFrame(output_frame))
-      {
-        return false;
-      }
+    // Receive decoded frame
+    ret = avcodec_receive_frame(codec_ctx_, frame_);
+    
+    if (ret == AVERROR(EAGAIN))
+    {
+      return true;  // Need more packets, try again
+    }
+    
+    if (ret < 0)
+    {
+      return false;  // Decode error
+    }
 
-      // Attempt to push decoded frame
-      if (output_buffer_.Push(output_frame))
+    // Successfully decoded a frame - scale and assemble
+    if (!ScaleFrame())
+    {
+      return false;
+    }
+
+    buffer::Frame output_frame;
+    if (!AssembleFrame(output_frame))
+    {
+      return false;
+    }
+
+    // Extract frame PTS in microseconds for pacing
+    int64_t frame_pts_us = output_frame.metadata.pts;
+    last_decoded_frame_pts_us_ = frame_pts_us;
+
+    // Establish time mapping on first frame
+    if (first_frame_pts_us_ == 0)
+    {
+      first_frame_pts_us_ = frame_pts_us;
+      if (master_clock_)
       {
-        frames_produced_.fetch_add(1, std::memory_order_relaxed);
-        return true;
+        playback_start_utc_us_ = master_clock_->now_utc_us();
       }
-      else
+    }
+
+    // Calculate target UTC time for this frame: playback_start + (frame_pts - first_frame_pts)
+    int64_t frame_offset_us = frame_pts_us - first_frame_pts_us_;
+    int64_t target_utc_us = playback_start_utc_us_ + frame_offset_us;
+
+    // Frame decoded and pushed to buffer
+
+    // If using fake clock, wait until fake time reaches target UTC time before pushing
+    if (master_clock_ && master_clock_->is_fake())
+    {
+      int64_t now_us = master_clock_->now_utc_us();
+      if (now_us < target_utc_us)
       {
-        // Buffer is full, back off
-        buffer_full_count_.fetch_add(1, std::memory_order_relaxed);
-        if (master_clock_)
+        // Wait until fake clock reaches target UTC time
+        while (master_clock_->now_utc_us() < target_utc_us &&
+               !stop_requested_.load(std::memory_order_acquire))
         {
-          int64_t now_utc_us = master_clock_->now_utc_us();
-          int64_t deadline_utc_us = now_utc_us + kProducerBackoffUs;
+          std::this_thread::yield();  // Busy-wait for fake clock to advance
+        }
+      }
+    }
+
+    // Attempt to push decoded frame
+    if (output_buffer_.Push(output_frame))
+    {
+      frames_produced_.fetch_add(1, std::memory_order_relaxed);
+      return true;
+    }
+    else
+    {
+      // Buffer is full, back off
+      buffer_full_count_.fetch_add(1, std::memory_order_relaxed);
+      if (master_clock_)
+      {
+        int64_t now_utc_us = master_clock_->now_utc_us();
+        int64_t deadline_utc_us = now_utc_us + kProducerBackoffUs;
+        if (master_clock_->is_fake())
+        {
+          // For fake clock, busy-wait
+          while (master_clock_->now_utc_us() < deadline_utc_us && 
+                 !stop_requested_.load(std::memory_order_acquire))
+          {
+            std::this_thread::yield();
+          }
+        }
+        else
+        {
           while (master_clock_->now_utc_us() < deadline_utc_us && 
                  !stop_requested_.load(std::memory_order_acquire))
           {
             std::this_thread::sleep_for(std::chrono::microseconds(100));
           }
         }
-        else
-        {
-          std::this_thread::sleep_for(std::chrono::microseconds(kProducerBackoffUs));
-        }
-        // Retry on next iteration
-        return true;  // Frame was decoded successfully, just couldn't push
       }
+      else
+      {
+        std::this_thread::sleep_for(std::chrono::microseconds(kProducerBackoffUs));
+      }
+      // Retry on next iteration
+      return true;  // Frame was decoded successfully, just couldn't push
     }
 #else
     return false;

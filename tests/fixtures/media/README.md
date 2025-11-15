@@ -48,3 +48,5 @@ TEST_F(VideoFileProducerContractTest, RealDecodeTest)
 - Real decode tests require FFmpeg to be available (`RETROVUE_FFMPEG_AVAILABLE`)
 - If the file doesn't exist or FFmpeg isn't available, the producer will fall back to stub mode
 
+
+

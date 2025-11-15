@@ -103,9 +103,9 @@ All MPEG-TS Playout Sink contract tests must run in a controlled environment wit
 
 ```bash
 RETROVUE_SINK_TARGET_FPS=30.0        # Target frame rate
-RETROVUE_SINK_BITRATE=5000000         # Encoding bitrate (5 Mbps)
-RETROVUE_SINK_GOP_SIZE=30             # GOP size (1 second at 30fps)
-RETROVUE_SINK_PORT=9000                          # TCP server port
+RETROVUE_SINK_BITRATE=5000000        # Encoding bitrate (5 Mbps)
+RETROVUE_SINK_GOP_SIZE=30            # GOP size (1 second at 30fps)
+RETROVUE_SINK_PORT=9000              # TCP server port
 RETROVUE_SINK_STUB_MODE=false        # Use real encode (true for stub mode)
 RETROVUE_SINK_BUFFER_SIZE=60         # FrameRingBuffer capacity
 ```
@@ -119,7 +119,7 @@ Before running contract tests, verify:
 3. ✅ Test decoded frames are valid YUV420 format
 4. ✅ Internal encoder subsystem initializes correctly (if using real encode mode)
 5. ✅ Network test harness can connect to TCP socket
-6. ✅ VLC can play MPEG-TS streams (for PS-005 verification)
+6. ✅ VLC can play MPEG-TS streams (for FE-015 / PE-005 playback sanity verification)
 7. ✅ Stub mode consumes frames correctly (fallback validation)
 
 ---
@@ -151,7 +151,7 @@ The MPEG-TS Playout Sink must satisfy the following behavioral guarantees:
 - ✅ Stop idempotent: Multiple `stop()` calls are safe
 - ✅ Destructor: Sink stops automatically on destruction
 
-**Test Files**: `tests/test_sink.cpp` (Construction, StartStop, CannotStartTwice, StopIdempotent, DestructorStopsSink)
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_001_SinkLifecycle, FE_001_DestructorStopsSink)
 
 ---
 
@@ -173,7 +173,7 @@ The MPEG-TS Playout Sink must satisfy the following behavioral guarantees:
 - ✅ No frame reordering: Sink does not reorder frames during encoding
 - ✅ FIFO compliance: Buffer pop order matches push order
 
-**Test Files**: `tests/test_sink.cpp` (FrameOrder, FramePTSMonotonicity)
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_002_PullsFramesInOrder, FE_002_FramePTSMonotonicity)
 
 ---
 
@@ -198,11 +198,11 @@ The MPEG-TS Playout Sink must satisfy the following behavioral guarantees:
 - ✅ Frame selection: Sink compares frame PTS with MasterClock time to determine when to output
 - ✅ Ahead of schedule: Sink sleeps when frame PTS is in future
 - ✅ Behind schedule: Sink drops frames when frame PTS is overdue
-- ✅ Timing accuracy: Frame output timing matches MasterClock time (within 1ms)
+- ✅ Timing accuracy: Frame output timing matches MasterClock time (conforms to FE-017 jitter/drift bounds)
 - ✅ Late frame detection: Sink detects late frames correctly (threshold: 33ms at 30fps)
 - ✅ No tick() calls: MasterClock never calls tick() on sink (sink pulls time)
 
-**Test Files**: `tests/test_sink.cpp` (MasterClockAlignment), `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp`
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_003_ObeysMasterClock, FE_003_DropsLateFrames)
 
 ---
 
@@ -229,27 +229,49 @@ The MPEG-TS Playout Sink must satisfy the following behavioral guarantees:
 
 ---
 
-### FE-005: Produces Playable MPEG-TS Stream Verified in VLC
+### FE-005: Error Detection and Classification
 
-**Rule**: Sink must produce a playable MPEG-TS stream that can be verified in VLC.
+**Rule**: The MPEG-TS Playout Sink must detect and classify all internal and external error conditions that would compromise output correctness, timing integrity, or device stability.
 
-**Expected Behavior**:
+**Error Classes**:
 
-- Muxer packages H.264 packets into valid MPEG-TS transport stream
-- MPEG-TS stream contains PAT/PMT tables
-- MPEG-TS stream has correct PTS/DTS mapping
-- Stream is playable in VLC media player
-- Stream maintains correct frame rate for broadcast
+**Recoverable Errors**:
 
-**Test Criteria**:
+- Late frames (within discardable threshold)
+- Temporary upstream starvation
+- PID discontinuity in input
+- Single PCR miss within allowable recovery range
+- Transient thread scheduling delays
 
-- ✅ Valid MPEG-TS: Output stream is valid MPEG-TS format (parsable by libavformat)
-- ✅ PAT/PMT: Stream contains Program Association Table and Program Map Table
-- ✅ VLC playback: Stream plays correctly in VLC (no artifacts, correct frame rate)
-- ✅ Frame rate: Stream maintains target frame rate (30fps for 30fps target)
-- ✅ PTS/DTS mapping: MPEG-TS PTS/DTS values match input frame PTS/DTS
+**Degraded-Mode Errors**:
 
-**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_005_ProducesPlayableMPEGTS)
+- Sustained starvation (above N ms)
+- Repeated late frames beyond discard window
+- PCR recovery requiring discontinuity flag insertion
+- Buffer overrun/underrun during steady load
+
+**Fault / Unrecoverable Errors**:
+
+- Corrupted frame memory
+- Decoder-critical invariant failure
+- Long-term MasterClock desynchronization
+- Repeated internal exceptions
+- TS muxer producing invalid packets
+
+**Pass Criteria**:
+
+- ✅ Error detection: Sink successfully detects and classifies all errors
+- ✅ Error classification: Sink does not misclassify unrecoverable errors as recoverable
+- ✅ Recoverable handling: Recoverable errors increment counters but do not force a state transition
+- ✅ Error logging: All errors generate expected log/event/audit entries
+
+**Fail Criteria**:
+
+- ❌ A recoverable error causes a sink fault
+- ❌ An unrecoverable error is ignored or remains unreported
+- ❌ Error does not generate the expected log/event/audit entry
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_005_ErrorDetectionAndClassification)
 
 ---
 
@@ -276,7 +298,7 @@ The MPEG-TS Playout Sink must satisfy the following behavioral guarantees:
 - ✅ Recovery: Sink resumes frame consumption when buffer has frames
 - ✅ Statistics accuracy: `getBufferEmptyCount()` accurately tracks empty buffer events
 
-**Test Files**: `tests/test_sink.cpp` (EmptyBufferHandling)
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_006_HandlesEmptyBuffer)
 
 ---
 
@@ -301,7 +323,7 @@ The MPEG-TS Playout Sink must satisfy the following behavioral guarantees:
 - ✅ No crash: Sink does not crash or throw exception on buffer overrun
 - ✅ Real-time output: Sink maintains real-time output pacing (no buffering)
 
-**Test Files**: `tests/test_sink.cpp` (BufferOverrunHandling), `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp`
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_007_HandlesBufferOverrun)
 
 ---
 
@@ -329,7 +351,490 @@ The MPEG-TS Playout Sink must satisfy the following behavioral guarantees:
 - ✅ Thread safety: Statistics can be read from any thread without race conditions
 - ✅ Accuracy: Statistics reflect actual operational state
 
-**Test Files**: `tests/test_sink.cpp` (StatisticsAccuracy, BufferOverrunHandling, EmptyBufferHandling)
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_008_ProperlyReportsStats)
+
+---
+
+### FE-009: Nonblocking Write
+
+**Rule**: Sink must handle non-blocking socket writes gracefully by queuing packets when socket returns `EAGAIN`/`EWOULDBLOCK`.
+
+**Expected Behavior**:
+
+- When socket write returns `EAGAIN`/`EWOULDBLOCK`, packet is queued to output queue
+- Worker thread does not block on network writes
+- Sink continues running even when socket buffer is full
+- Packets are eventually sent when socket becomes writable
+
+**Test Criteria**:
+
+- ✅ Non-blocking writes: Sink handles `EAGAIN`/`EWOULDBLOCK` without blocking
+- ✅ Packet queuing: Packets are queued when socket is not writable
+- ✅ Worker thread: Worker thread continues running (does not deadlock)
+- ✅ Sink stability: Sink remains running during network backpressure
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_009_NonblockingWrite)
+
+---
+
+### FE-010: Queue Overflow
+
+**Rule**: Sink must handle output queue overflow gracefully by dropping older packets, not crashing.
+
+**Expected Behavior**:
+
+- When output queue reaches capacity, older packets are dropped
+- Sink continues operation (does not crash)
+- New packets continue to be queued
+- Queue size remains bounded
+
+**Test Criteria**:
+
+- ✅ Queue overflow: Sink handles queue overflow without crashing
+- ✅ Packet dropping: Older packets are dropped when queue is full
+- ✅ Sink stability: Sink continues running during queue overflow
+- ✅ Queue bounded: Queue size does not grow unbounded
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_010_QueueOverflow)
+
+---
+
+### FE-011: Client Disconnect
+
+**Rule**: Sink must handle client disconnect gracefully and continue waiting for new connections.
+
+**Expected Behavior**:
+
+- When client disconnects, sink detects disconnect
+- Sink tears down muxer and encoder resources
+- Sink continues running (waiting for new client)
+- New client can connect and streaming resumes
+
+**Test Criteria**:
+
+- ✅ Disconnect detection: Sink detects client disconnect
+- ✅ Resource cleanup: Muxer and encoder are torn down on disconnect
+- ✅ Sink continues: Sink remains running after disconnect
+- ✅ Reconnection: New client can connect and streaming resumes
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_011_ClientDisconnect)
+
+---
+
+### FE-012: Error → Sink Status Mapping
+
+**Rule**: Each error class from FE-005 must map deterministically to the correct sink status and expose that status externally through the API/telemetry interface.
+
+**Status Values**:
+
+**RUNNING**:
+
+- Recoverable errors encountered but successfully handled
+- Output timing remains stable or corrected by PCR shaping
+
+**DEGRADED**:
+
+- Degraded-mode errors encountered
+- Output remains valid MPEG-TS
+- Clock drift or PCR correction operating at enhanced levels
+- Upstream should be alerted but downstream playback must remain intact
+
+**FAULTED**:
+
+- Unrecoverable errors encountered
+- Output stability or spec compliance cannot be guaranteed
+- Sink halts output or enters safe "null fill" mode depending on env config
+
+**Pass Criteria**:
+
+- ✅ Status mapping: Status reflects the highest severity error currently active
+- ✅ Status elevation: Once elevated (RUNNING → DEGRADED → FAULTED), the status:
+  - may return to RUNNING from DEGRADED if recovery rules allow
+  - must never silently clear FAULTED without an explicit reset
+- ✅ Status exposure: Status is exposed through public API/telemetry interface
+- ✅ Deterministic mapping: Error class maps deterministically to correct status
+
+**Fail Criteria**:
+
+- ❌ Incorrect status for given error class
+- ❌ Status fails to propagate through public API
+- ❌ Sink oscillates between states without conditions changing
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_012_ErrorToSinkStatusMapping)
+
+---
+
+### FE-013: Encodes Real Decoded Frames
+
+**Rule**: Sink must encode real decoded frames (from VideoFileProducer) into valid H.264 packets.
+
+**Expected Behavior**:
+
+- Sink receives decoded frames from VideoFileProducer
+- Frames are encoded into H.264 NAL units
+- Encoded packets are muxed into MPEG-TS format
+- Output stream contains valid MPEG-TS packets with sync bytes
+
+**Test Criteria**:
+
+- ✅ Real encoding: Sink encodes real decoded frames (not stub)
+- ✅ H.264 output: Encoded output contains H.264 NAL units
+- ✅ MPEG-TS format: Output contains valid MPEG-TS packets (0x47 sync byte)
+- ✅ Substantial data: Output contains substantial data (indicating encoding occurred)
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_013_EncodesRealDecodedFrames)
+
+---
+
+### FE-014: Generates Increasing PTS in MPEG-TS Output
+
+**Rule**: MPEG-TS output must have monotonically increasing PTS values.
+
+**Expected Behavior**:
+
+- PTS values in MPEG-TS packets increase monotonically
+- No PTS values decrease or repeat (except at wrap-around)
+- PTS ordering matches input frame ordering
+
+**Test Criteria**:
+
+- ✅ PTS monotonicity: PTS values increase monotonically in output
+- ✅ No PTS regression: PTS values never decrease
+- ✅ PTS ordering: PTS ordering matches input frame ordering
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_014_GeneratesIncreasingPTSInMpegTSOutput)
+
+---
+
+### FE-015: Output Is Readable by FFprobe
+
+**Rule**: MPEG-TS output must be readable by FFmpeg/FFprobe (valid stream format).
+
+**Expected Behavior**:
+
+- Output stream can be opened by `avformat_open_input()`
+- Stream info can be found by `avformat_find_stream_info()`
+- Stream contains valid video stream with correct codec parameters
+- Codec parameters (width, height, codec_id) are correct
+
+**Test Criteria**:
+
+- ✅ FFmpeg readable: Output can be opened by `avformat_open_input()`
+- ✅ Stream info: Stream info can be found
+- ✅ Video stream: Stream contains valid video stream
+- ✅ Codec parameters: Codec parameters are correct (H.264, valid dimensions)
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_015_OutputIsReadableByFFprobe)
+
+---
+
+### FE-016: Frame Timing Is Preserved Through Encoding and Muxing
+
+**Rule**: Frame PTS values must be preserved through encoding and muxing with acceptable tolerance.
+
+**Expected Behavior**:
+
+- Frame PTS values are preserved through encoding pipeline
+- MPEG-TS PTS values correspond to input frame PTS (within tolerance)
+- Frame rate is maintained in output stream
+- Timing accuracy is within tolerance (e.g., 50ms)
+
+**Test Criteria**:
+
+- ✅ PTS preservation: Frame PTS values are preserved (within tolerance)
+- ✅ Frame rate: Output frame rate matches input frame rate
+- ✅ Timing accuracy: Timing accuracy is within tolerance (50ms)
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_016_FrameTimingIsPreservedThroughEncodingAndMuxing)
+
+---
+
+### FE-017: Real-Time Output Timing Stability
+
+**Rule**: The MPEG-TS Playout Sink must produce transport stream packets at a stable, real-time rate relative to the MasterClock, within tolerances achievable on non-real-time operating systems, while preserving PCR correctness and output compliance.
+
+**1. Timing Jitter Requirements**:
+
+**Steady-State Jitter**:
+
+- During normal operation under typical CPU load:
+  - Output packet timing shall remain within ±8 ms of ideal real-time scheduling
+  - Rationale: ±8 ms is achievable under Linux with real-time priority threads and matches typical playout jitter budgets for software-based systems
+
+**Short Burst Tolerance**:
+
+- The system may experience rare jitter spikes due to OS scheduling or GC/allocator stalls
+- Allowed:
+  - Occasional spikes up to ±15 ms
+  - No more than 1 spike per 5 seconds
+  - Must self-correct by the next 3 packets
+
+**Sustained Drift**:
+
+- The sink must prevent accumulated drift from exceeding:
+  - 20 ms deviation from real-time over any rolling 1-second window
+  - If drift approaches this threshold, PCR correction and buffer shaping must resynchronize output
+
+**2. PCR Correctness Requirements**:
+
+- Even if wall-clock jitter occurs, PCR output must remain compliant:
+  - PCR slope error must remain within ±500 ns per PCR interval (DVB/ATSC limit)
+  - Note: Actual measurement may use coarser resolution (e.g., microsecond-level) but must ensure compliance with the ±500 ns limit when validated
+  - PCR discontinuity_flag must be inserted if slope correction exceeds automatic correction limits
+  - PCR correctness is the primary compliance requirement; wall-clock jitter is secondary
+
+**3. Late Frame Handling**:
+
+- If the sink receives input frames later than their scheduled playout time:
+  - The sink must drop or fast-forward decode (per FE-007 / FE-008 / EH-005) to return to real-time
+  - These drops do not count as timing jitter failures
+  - They do count in FE-007 / FE-008 / EH-005 late-frame metrics
+
+**Current Test Implementation** (as verified by `FE_017_RealTimeOutputTimingStability`):
+
+The test verifies PCR correctness as the primary compliance requirement:
+
+- ✅ PCR intervals: PCR intervals are within acceptable range (≥ 1800 ticks / 20ms, ≤ 9000 ticks / 100ms)
+- ✅ PCR monotonicity: PCR values increase monotonically
+- ✅ First PCR interval skipped: First PCR interval (i=1) is skipped as initialization artifact
+- ✅ PCR slope compliance: PCR intervals remain within DVB/ATSC limits (20-100ms per ISO/IEC 13818-1)
+
+**Note**: The test focuses on PCR correctness rather than detailed wall-clock jitter measurements. The jitter/drift requirements above represent design goals, but the current test validates PCR compliance as the primary metric.
+
+**Pass Criteria** (as tested):
+
+- ✅ PCR intervals: ≥ 1800 (20ms in 90kHz units), ≤ 9000 (100ms in 90kHz units)
+- ✅ PCR monotonicity: PCR values increase monotonically
+- ✅ First interval skipped: First PCR diff is ignored (initialization artifact)
+- ✅ Multiple PCR packets: Test collects at least 10 PCR packets for validation
+
+**Fail Criteria** (as tested):
+
+- ❌ PCR interval too short: < 1800 ticks (< 20ms)
+- ❌ PCR interval too long: > 9000 ticks (> 100ms)
+- ❌ PCR non-monotonic: PCR values decrease or repeat
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_017_RealTimeOutputTimingStability)
+
+---
+
+### FE-018: PTS/DTS Integrity
+
+**Rule**: PTS/DTS values must be monotonic and satisfy DTS ≤ PTS.
+
+**Expected Behavior**:
+
+- PTS values increase monotonically
+- DTS values increase monotonically
+- DTS ≤ PTS for all packets
+- No PTS/DTS regression
+
+**Test Criteria**:
+
+- ✅ PTS monotonicity: PTS values increase monotonically
+- ✅ DTS monotonicity: DTS values increase monotonically
+- ✅ DTS ≤ PTS: DTS ≤ PTS for all packets
+- ✅ No regression: No PTS/DTS values decrease
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_018_PTS_DTS_Integrity)
+
+---
+
+### FE-019: PCR Cadence
+
+**Rule**: PCR (Program Clock Reference) packets must appear at correct intervals per ISO/IEC 13818-1.
+
+**Expected Behavior**:
+
+- PCR packets appear at regular intervals
+- Real PCR cadence:
+  - ~20ms minimum (rare)
+  - ~66ms typical
+  - ≤100ms maximum (ISO/IEC 13818-1: max PCR interval 100ms)
+- PCR values increase monotonically
+- PCR cadence is maintained throughout stream
+
+**Test Criteria**:
+
+- ✅ PCR intervals: PCR intervals are within 20-100ms range (ISO/IEC 13818-1 compliant)
+- ✅ PCR monotonicity: PCR values increase monotonically
+- ✅ PCR cadence: PCR cadence is maintained (≥ 20ms, ≤ 100ms)
+- ✅ First PCR interval skipped: First PCR interval is ignored (initialization artifact)
+
+**Current Test Criteria** (as implemented):
+- PCR intervals: ≥ 1800 (20ms in 90kHz units), ≤ 9000 (100ms in 90kHz units)
+- First PCR interval (i=1) is skipped as it is always garbage (initialization artifact)
+- Note: This range accounts for real-time encoding variations, VBR mode behavior, and ISO/IEC 13818-1 specification requirements
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_019_PCR_Cadence)
+
+---
+
+### FE-020: Fault Mode Behavior & Latching
+
+**Rule**: Fault states must remain latched until the sink is explicitly reset, to ensure upstream controllers are aware of unrecoverable issues and can coordinate restarts without race conditions.
+
+**Required Behavior**:
+
+**Fault Latching**:
+
+- Upon entering FAULTED:
+  - latches active fault code
+  - halts or safe-fills output stream
+  - stops accepting new frames
+  - reports via telemetry immediately
+
+**Fault Isolation**:
+
+- Sink must not reinitialize internal mux/timing loops automatically
+- No auto-recover behavior unless explicitly enabled (off by default)
+
+**Reset Requirements**:
+
+- Only the following actions clear fault state:
+  - Explicit `reset()` API call
+  - Full teardown + re-instantiate of the sink object
+
+**Auditability**:
+
+- A full fault report must be available, including:
+  - fault type
+  - last valid PCR/PTS values
+  - last n error events
+  - uptime at fault time
+  - input/output byte counters
+
+**Current Test Implementation** (as verified by `FE_020_FaultModeBehaviorAndLatching`):
+
+The test currently verifies basic state consistency and teardown behavior:
+
+- ✅ State consistency: Sink maintains consistent state (running or not running)
+- ✅ Full teardown clears state: Re-instantiated sink starts in clean state
+- ✅ Basic fault isolation: Sink does not auto-recover (verified via state consistency)
+
+**Note**: The test is currently a placeholder that verifies basic state management. Full fault injection, latching, and auditability testing requires additional API support (e.g., `reset()`, `getFaultReport()`, explicit fault injection methods).
+
+**Pass Criteria** (as tested):
+
+- ✅ State consistency: Sink state is consistent (no invalid states)
+- ✅ Clean teardown: Full teardown and re-instantiation results in clean state
+- ✅ Sink stability: Sink remains stable during test execution
+
+**Fail Criteria** (as tested):
+
+- ❌ State inconsistency: Sink enters invalid state
+- ❌ Teardown failure: Re-instantiated sink does not start cleanly
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_020_FaultModeBehaviorAndLatching)
+
+---
+
+### FE-021: Encoder Stall Recovery
+
+**Rule**: Sink must detect and recover from encoder stalls.
+
+**Expected Behavior**:
+
+- Sink detects encoder stalls (no output for extended period)
+- Sink continues operation (does not deadlock)
+- Sink recovers from stall when encoder resumes
+- Worker thread remains responsive
+
+**Current Test Implementation** (as verified by `FE_021_EncoderStallRecovery`):
+
+The test verifies that the sink continues operating even with slow writes:
+
+- ✅ No deadlock: Sink does not deadlock during slow writes
+- ✅ Worker responsiveness: Worker thread remains responsive
+- ✅ Sink stability: Sink continues running during slow write conditions
+
+**Note**: The test currently verifies basic stall resilience. Full stall detection and recovery testing requires additional instrumentation (e.g., write callback injection, stall detection metrics).
+
+**Pass Criteria** (as tested):
+
+- ✅ Sink continues running: Sink remains running during slow write conditions
+- ✅ No deadlock: Worker thread does not block indefinitely
+- ✅ Basic resilience: Sink handles slow writes gracefully
+
+**Fail Criteria** (as tested):
+
+- ❌ Sink deadlocks: Worker thread blocks indefinitely
+- ❌ Sink stops: Sink stops running unexpectedly
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_021_EncoderStallRecovery)
+
+---
+
+### FE-022: Queue Invariants
+
+**Rule**: Output queue must maintain invariants during overflow and backpressure.
+
+**Expected Behavior**:
+
+- Queue size is bounded (does not grow unbounded)
+- Queue overflow handling drops packets correctly
+- Queue remains stable during backpressure
+- Sink continues operation during queue overflow
+
+**Current Test Implementation** (as verified by `FE_022_QueueInvariants`):
+
+The test verifies queue stability during overflow conditions:
+
+- ✅ Queue bounded: Queue size remains bounded (does not grow unbounded)
+- ✅ Sink stability: Sink continues operation during queue overflow
+- ✅ Overflow handling: Queue overflow is handled without crashing
+
+**Note**: The test verifies basic queue invariants. Detailed packet drop counting and queue size metrics may require additional API support.
+
+**Pass Criteria** (as tested):
+
+- ✅ Sink continues running: Sink remains running during queue overflow
+- ✅ Queue bounded: Queue size does not grow unbounded
+- ✅ No crash: Sink handles overflow without crashing
+
+**Fail Criteria** (as tested):
+
+- ❌ Sink crashes: Sink crashes during queue overflow
+- ❌ Queue unbounded: Queue grows unbounded
+- ❌ Sink stops: Sink stops running unexpectedly
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_022_QueueInvariants)
+
+---
+
+### FE-023: TS Packet Alignment Preserved
+
+**Rule**: TS packets must be written only on 188-byte boundaries.
+
+**Expected Behavior**:
+
+- All TS packets are 188 bytes
+- Every 188 bytes contains sync byte (0x47)
+- No partial packets in output stream
+- Packet alignment is preserved through network I/O
+
+**Current Test Implementation** (as verified by `FE_023_TSPacketAlignmentPreserved`):
+
+The test verifies TS packet alignment by checking sync byte positions:
+
+- ✅ Sync byte alignment: Every 188 bytes contains sync byte (0x47)
+- ✅ Packet alignment: TS packets are aligned on 188-byte boundaries
+- ✅ Multiple packets: Test verifies alignment across multiple packets (≥ 10 packets)
+
+**Note**: The test collects data in small chunks to verify alignment is preserved through network I/O. A remainder at the end (not a multiple of 188) is acceptable if it's the last partial chunk.
+
+**Pass Criteria** (as tested):
+
+- ✅ Sync byte alignment: Every 188-byte boundary has sync byte (0x47)
+- ✅ Multiple packets: At least 10 aligned TS packets are verified
+- ✅ No misalignment: No misaligned packets detected
+
+**Fail Criteria** (as tested):
+
+- ❌ Misaligned packets: Sync byte (0x47) not found at 188-byte boundaries
+- ❌ Insufficient packets: Less than 10 aligned packets found
+
+**Test Files**: `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` (FE_023_TSPacketAlignmentPreserved)
 
 ---
 
@@ -584,22 +1089,41 @@ The MPEG-TS Playout Sink must handle the following error conditions:
 
 ## Test Coverage Requirements
 
-All functional expectations (FE-001 through FE-008) must have corresponding test coverage.
+All functional expectations (FE-001 through FE-023) must have corresponding test coverage.
 
 ### Test File Mapping
 
 | Functional Expectation | Test File                                    | Test Case Name                    |
 | ---------------------- | -------------------------------------------- | ---------------------------------- |
 | FE-001                 | `tests/test_sink.cpp`                        | Construction, StartStop, CannotStartTwice, StopIdempotent, DestructorStopsSink |
+| FE-001                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_001_SinkLifecycle, FE_001_DestructorStopsSink |
 | FE-002                 | `tests/test_sink.cpp`                        | FrameOrder, FramePTSMonotonicity   |
+| FE-002                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_002_PullsFramesInOrder, FE_002_FramePTSMonotonicity |
 | FE-003                 | `tests/test_sink.cpp`                        | MasterClockAlignment               |
-| FE-003                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_003_ObeysMasterClock |
+| FE-003                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_003_ObeysMasterClock, FE_003_DropsLateFrames |
 | FE-004                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_004_EncodesValidH264 |
-| FE-005                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_005_ProducesPlayableMPEGTS |
+| FE-005                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_005_ErrorDetectionAndClassification |
 | FE-006                 | `tests/test_sink.cpp`                        | EmptyBufferHandling                |
+| FE-006                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_006_HandlesEmptyBuffer |
 | FE-007                 | `tests/test_sink.cpp`                        | BufferOverrunHandling              |
 | FE-007                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_007_HandlesBufferOverrun |
 | FE-008                 | `tests/test_sink.cpp`                        | StatisticsAccuracy, BufferOverrunHandling, EmptyBufferHandling |
+| FE-008                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_008_ProperlyReportsStats |
+| FE-009                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_009_NonblockingWrite |
+| FE-010                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_010_QueueOverflow |
+| FE-011                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_011_ClientDisconnect |
+| FE-012                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_012_ErrorToSinkStatusMapping |
+| FE-013                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_013_EncodesRealDecodedFrames |
+| FE-014                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_014_GeneratesIncreasingPTSInMpegTSOutput |
+| FE-015                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_015_OutputIsReadableByFFprobe |
+| FE-016                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_016_FrameTimingIsPreservedThroughEncodingAndMuxing |
+| FE-017                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_017_RealTimeOutputTimingStability |
+| FE-018                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_018_PTS_DTS_Integrity |
+| FE-019                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_019_PCR_Cadence |
+| FE-020                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_020_FaultModeBehaviorAndLatching |
+| FE-021                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_021_EncoderStallRecovery |
+| FE-022                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_022_QueueInvariants |
+| FE-023                 | `tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp` | FE_023_TSPacketAlignmentPreserved |
 
 ### Coverage Requirements
 
@@ -647,7 +1171,7 @@ The following rules are enforced in continuous integration:
 2. ✅ Static analysis passes (clang-tidy, cppcheck)
 3. ✅ Documentation is up-to-date (domain doc matches implementation)
 4. ✅ All frames verified as decoded (YUV420 format, not encoded packets)
-5. ✅ MPEG-TS stream verified as playable in VLC (for FE-005)
+5. ✅ MPEG-TS stream verified as playable in VLC (for FE-015)
 
 ---
 

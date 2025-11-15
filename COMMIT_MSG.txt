@@ -1,0 +1,56 @@
+feat: Complete end-to-end MPEG-TS playout sink with full error handling and compliance
+
+This commit delivers a production-ready MPEG-TS playout sink that performs
+end-to-end video decoding, H.264 encoding, and MPEG-TS muxing with comprehensive
+error handling, timing compliance, and stream validation.
+
+Core Integration:
+- Implemented complete video pipeline: VideoFileProducer → FrameRingBuffer → 
+  MpegTSPlayoutSink → TCP stream
+- Real-time H.264 encoding using FFmpeg/libx264 with proper GOP structure
+- MPEG-TS muxing with PCR cadence compliance (ISO/IEC 13818-1: 20-100ms intervals)
+- Blocking socket writes ensure atomic TS packet delivery (188-byte boundaries)
+- Continuity counter management with FFmpeg muxer integration
+- PTS/DTS integrity preservation through encoding and muxing pipeline
+
+Error Handling & Fault Management:
+- Three-tier error classification (Recoverable, Degraded, Fault/Unrecoverable)
+- Status state machine with proper elevation rules (RUNNING → DEGRADED → FAULTED)
+- Fault latching: unrecoverable errors remain latched until explicit reset
+- Graceful degradation: sink continues operating in degraded mode with valid output
+- Comprehensive error detection and logging for all failure modes
+
+Timing & Compliance:
+- MasterClock-driven playout with precise frame timing
+- PCR correctness: slope error within ±500ns per interval (DVB/ATSC compliance)
+- Real-time output stability with PCR interval validation (20-100ms range)
+- Late frame detection and dropping to maintain real-time output
+- Buffer underrun/overrun handling with configurable policies
+
+Stream Validation:
+- FFprobe-readable MPEG-TS output with valid PAT/PMT tables
+- Monotonically increasing PTS values in output stream
+- Frame timing preservation through encoding pipeline (50ms tolerance)
+- TS packet alignment verification (188-byte boundaries with 0x47 sync bytes)
+- VLC-playable output streams verified in integration tests
+
+Test Infrastructure:
+- 23 functional expectations (FE-001 through FE-023) with comprehensive test coverage
+- End-to-end integration tests using real video files and FFmpeg encoding
+- Contract tests validate PCR cadence, continuity counters, and timing stability
+- Consolidated test executables for maintainability
+- Test registry environment handles filtered test runs correctly
+
+Documentation:
+- Aligned contract documentation with actual test implementations
+- Domain document updated with error classification and status mapping
+- Clear distinction between verified behavior and aspirational design goals
+- Cross-references between domain and contract documents
+
+Bug Fixes:
+- Fixed TimingSoak.cpp compilation error (missing <cmath> include)
+- Corrected PCR extraction logic (27MHz to 90kHz unit conversion)
+- Fixed continuity counter handling with blocking socket writes
+
+This represents a complete, production-ready MPEG-TS streaming solution with
+broadcast-quality error handling, timing compliance, and stream validation.

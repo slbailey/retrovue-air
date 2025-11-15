@@ -69,9 +69,16 @@ public:
   void TearDown() override
   {
     std::lock_guard<std::mutex> lock(CoverageMutex());
+    const auto& registry = ContractRegistry::Instance();
     for (const auto& [domain, rules] : CoverageExpectations())
     {
-      VerifyDomainCoverage(domain, Deduplicate(rules));
+      // Only verify coverage for domains that actually have tests registered
+      // This allows filtered test runs (e.g., --gtest_filter) to work correctly
+      const auto covered_rules = registry.CoveredRules(domain);
+      if (!covered_rules.empty())
+      {
+        VerifyDomainCoverage(domain, Deduplicate(rules));
+      }
     }
   }
 };

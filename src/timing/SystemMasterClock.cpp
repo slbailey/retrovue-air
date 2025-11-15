@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <memory>
+#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -62,6 +63,20 @@ class SystemMasterClock : public MasterClock {
   }
 
   double drift_ppm() const override { return drift_ppm_; }
+
+  void WaitUntilUtcUs(int64_t target_utc_us) const override {
+    while (true) {
+      const int64_t now = now_utc_us();
+      const int64_t remaining = target_utc_us - now;
+      if (remaining <= 0) {
+        break;
+      }
+      // Sleep in chunks to allow for responsive wake-up
+      const int64_t sleep_us = (remaining > 2'000) ? remaining - 1'000
+                                                    : std::max<int64_t>(remaining / 2, 200);
+      std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+    }
+  }
 
   void set_drift_ppm(double ppm) { drift_ppm_ = ppm; }
   void set_rate_ppm(double ppm) { rate_ppm_ = ppm; }

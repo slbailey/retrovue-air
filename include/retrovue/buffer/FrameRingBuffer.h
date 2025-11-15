@@ -41,6 +41,18 @@ namespace retrovue::buffer
     Frame() : width(0), height(0) {}
   };
 
+  // AudioFrame holds decoded audio samples (PCM) along with timing metadata.
+  struct AudioFrame
+  {
+    std::vector<uint8_t> data;   // PCM samples (interleaved, S16 format)
+    int sample_rate;             // Sample rate (e.g., 48000)
+    int channels;                // Number of channels (e.g., 2 for stereo)
+    int64_t pts_us;              // Presentation timestamp in microseconds
+    int nb_samples;              // Number of PCM samples in this frame
+
+    AudioFrame() : sample_rate(0), channels(0), pts_us(0), nb_samples(0) {}
+  };
+
   // FrameRingBuffer is a lock-free circular buffer for producer-consumer frame streaming.
   //
   // Design:
@@ -48,6 +60,7 @@ namespace retrovue::buffer
   // - Atomic read/write indices for thread safety
   // - Non-blocking push/pop operations
   // - Returns success/failure instead of blocking
+  // - Supports both video frames and audio frames
   //
   // Thread Model:
   // - Single producer (decode thread)
@@ -69,21 +82,37 @@ namespace retrovue::buffer
     FrameRingBuffer(const FrameRingBuffer &) = delete;
     FrameRingBuffer &operator=(const FrameRingBuffer &) = delete;
 
-    // Attempts to push a frame into the buffer.
+    // Attempts to push a video frame into the buffer.
     // Returns true if successful, false if buffer is full.
     // Thread-safe for single producer.
     bool Push(const Frame &frame);
 
-    // Attempts to pop a frame from the buffer.
+    // Attempts to push an audio frame into the buffer.
+    // Returns true if successful, false if buffer is full.
+    // Thread-safe for single producer.
+    bool PushAudioFrame(const AudioFrame &audio_frame);
+
+    // Attempts to pop a video frame from the buffer.
     // Returns true if successful, false if buffer is empty.
     // Thread-safe for single consumer.
     bool Pop(Frame &frame);
 
-    // Peeks at the next frame without removing it.
+    // Attempts to pop an audio frame from the buffer.
+    // Returns true if successful, false if buffer is empty.
+    // Thread-safe for single consumer.
+    bool PopAudioFrame(AudioFrame &audio_frame);
+
+    // Peeks at the next video frame without removing it.
     // Returns pointer to frame if available, nullptr if buffer is empty.
     // Thread-safe for single consumer.
     // Note: The returned pointer is only valid until the next Pop() or Push().
     const Frame* Peek() const;
+
+    // Peeks at the next audio frame without removing it.
+    // Returns pointer to audio frame if available, nullptr if buffer is empty.
+    // Thread-safe for single consumer.
+    // Note: The returned pointer is only valid until the next PopAudioFrame() or PushAudioFrame().
+    const AudioFrame* PeekAudioFrame() const;
 
     // Returns the current number of frames in the buffer.
     // This is an approximate count due to concurrent access.
@@ -105,6 +134,11 @@ namespace retrovue::buffer
   private:
     const size_t capacity_;
     std::unique_ptr<Frame[]> buffer_;
+
+    // Audio frame buffer (separate from video buffer)
+    std::unique_ptr<AudioFrame[]> audio_buffer_;
+    std::atomic<uint32_t> audio_write_index_;
+    std::atomic<uint32_t> audio_read_index_;
 
     // Atomic indices for lock-free operation
     std::atomic<uint32_t> write_index_;

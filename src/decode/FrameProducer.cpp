@@ -269,6 +269,10 @@ void FrameProducer::ProduceRealFrame() {
   // Frame successfully decoded and pushed
   frames_produced_.fetch_add(1, std::memory_order_relaxed);
 
+  // Try to decode audio frame (audio may not be available or may be at different rate)
+  // Audio decoding is non-blocking - if buffer is full or no audio, just continue
+  decoder_->DecodeNextAudioFrame(output_buffer_);
+
   // Log progress periodically
   const auto& stats = decoder_->GetStats();
   if (stats.frames_decoded % 100 == 0) {

@@ -53,7 +53,6 @@ echo "[3/4] Building contract tests..."
 cmake --build build -j$(nproc) --target \
     contracts_masterclock_tests \
     contracts_metricsandtiming_tests \
-    contracts_metricsexport_tests \
     contracts_playoutcontrol_tests \
     contracts_orchestrationloop_tests \
     contracts_playoutengine_tests \

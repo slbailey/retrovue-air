@@ -5,15 +5,27 @@
 
 #include "BaseContractTest.h"
 #include "retrovue/telemetry/MetricsExporter.h"
+#include "../ContractRegistryEnvironment.h"
 
 namespace retrovue::tests::contracts {
+
+  using retrovue::tests::RegisterExpectedDomainCoverage;
+
+  const bool kRegisterCoverage = []()
+  {
+    RegisterExpectedDomainCoverage("MetricsExport",
+                                   {"MET-001",
+                                    "MET-002",
+                                    "MET-003"});
+    return true;
+  }();
 
 class MetricsExportContractTest : public BaseContractTest {
  protected:
   [[nodiscard]] std::string DomainName() const override { return "MetricsExport"; }
 
   [[nodiscard]] std::vector<std::string> CoveredRuleIds() const override {
-    return {"MET_001", "MET_002", "MET_003"};
+    return {"MET-001", "MET-002", "MET-003"};
   }
 };
 

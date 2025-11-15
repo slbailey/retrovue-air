@@ -106,11 +106,19 @@ TEST_F(PlayoutEngineContractTest, BC_005_ChannelStopReleasesResources)
 
   auto runtime = manager.StartChannel(201, config, exporter, /*buffer_capacity=*/12);
 
+  // Verify channel is running before stop
+  telemetry::ChannelMetrics metrics_before{};
+  ASSERT_TRUE(exporter.GetChannelMetrics(201, metrics_before));
+  EXPECT_NE(metrics_before.state, telemetry::ChannelState::STOPPED);
+
   manager.StopChannel(runtime, exporter);
 
-  telemetry::ChannelMetrics metrics{};
-  ASSERT_TRUE(exporter.GetChannelMetrics(201, metrics));
-  EXPECT_EQ(metrics.state, telemetry::ChannelState::STOPPED);
+  // After stop, metrics are removed to avoid stale state (MT-005)
+  telemetry::ChannelMetrics metrics_after{};
+  EXPECT_FALSE(exporter.GetChannelMetrics(201, metrics_after))
+      << "Metrics should be removed after channel stop";
+  
+  // Verify resources are released
   ASSERT_NE(runtime.buffer, nullptr);
   EXPECT_TRUE(runtime.buffer->IsEmpty());
 }
@@ -138,9 +146,14 @@ TEST_F(PlayoutEngineContractTest, BC_003_ControlOperationsAreIdempotent)
       << "Repeated StartChannel must be a no-op";
 
   manager.StopChannel(runtime_first, exporter);
-  manager.StopChannel(runtime_first, exporter); // idempotent stop
-  ASSERT_TRUE(exporter.GetChannelMetrics(210, metrics));
-  EXPECT_EQ(metrics.state, telemetry::ChannelState::STOPPED);
+  // After first stop, metrics are removed (MT-005)
+  EXPECT_FALSE(exporter.GetChannelMetrics(210, metrics))
+      << "Metrics should be removed after channel stop";
+  
+  manager.StopChannel(runtime_first, exporter); // idempotent stop - should be safe to call again
+  // Metrics should still be removed after idempotent stop
+  EXPECT_FALSE(exporter.GetChannelMetrics(210, metrics))
+      << "Metrics should remain removed after idempotent stop";
 
   manager.StopChannel(runtime_second, exporter);
 }
